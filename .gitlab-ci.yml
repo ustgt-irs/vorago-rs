@@ -20,19 +20,31 @@ stages:
       - va416xx/target/
     key: ${CI_COMMIT_REF_SLUG}
 
+# The cargo configs are not checked in. Without them, binaries are linked without flip-link and
+# the linker scripts.
+.embedded_setup:
+  before_script:
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - command -v flip-link >/dev/null 2>&1 || cargo install flip-link
+    - cp va108xx/.cargo/config.toml.template va108xx/.cargo/config.toml
+    - cp va416xx/.cargo/config.toml.template va416xx/.cargo/config.toml
+
 .rust_setup_thumbv7em:
   extends: .common_setup
   before_script:
+    - !reference [.embedded_setup, before_script]
     - rustup target add thumbv7em-none-eabihf
 
 .rust_setup_thumbv6m:
   extends: .common_setup
   before_script:
+    - !reference [.embedded_setup, before_script]
     - rustup target add thumbv6m-none-eabi
 
 .rust_setup_both_targets:
   extends: .common_setup
   before_script:
+    - !reference [.embedded_setup, before_script]
     - rustup target add thumbv7em-none-eabihf thumbv6m-none-eabi
 
 .nextest_setup:

@@ -26,6 +26,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: flip-link
+      # Without the config, binaries are linked without flip-link and the linker scripts.
+      - run: cp .cargo/config.toml.template .cargo/config.toml
       - run: cargo build --target thumbv7em-none-eabihf
 
   test:

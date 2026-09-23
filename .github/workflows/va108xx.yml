@@ -26,7 +26,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv6m-none-eabi"
-      - run: cargo build --target thumbv6m-none-eabi
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: flip-link
+      # Without the config, binaries are linked without flip-link and the linker scripts.
+      - run: cp .cargo/config.toml.template .cargo/config.toml
+      # The flashloader does not fit into flash in a debug build.
+      - run: cargo build --target thumbv6m-none-eabi --release
 
   test:
     name: Run Tests

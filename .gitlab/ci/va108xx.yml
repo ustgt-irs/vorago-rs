@@ -15,7 +15,8 @@ va108xx-build:
   extends: .rust_setup_thumbv6m
   script:
     - cd va108xx
-    - cargo build --target thumbv6m-none-eabi
+    # The flashloader does not fit into flash in a debug build.
+    - cargo build --target thumbv6m-none-eabi --release
 
 va108xx-test:
   stage: stage2
