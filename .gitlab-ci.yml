@@ -18,6 +18,7 @@ stages:
       - vorago-shared-hal/target/
       - va108xx/target/
       - va416xx/target/
+      - host/target/
     key: ${CI_COMMIT_REF_SLUG}
 
 # The cargo configs are not checked in. Without them, binaries are linked without flip-link and
@@ -56,3 +57,4 @@ include:
   - local: '.gitlab/ci/shared-hal.yml'
   - local: '.gitlab/ci/va108xx.yml'
   - local: '.gitlab/ci/va416xx.yml'
+  - local: '.gitlab/ci/host.yml'

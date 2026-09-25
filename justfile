@@ -2,15 +2,17 @@ all: check \
     build \
     check-fmt \
     clippy \
+    test \
     docs
 
 check: check-va108xx check-va416xx
 build: build-va108xx build-va416xx
-check-fmt: check-fmt-va108xx check-fmt-va416xx
-fmt: fmt-va108xx fmt-va416xx fmt-shared-hal
-clippy: clippy-va108xx clippy-va416xx clippy-shared-hal
+check-fmt: check-fmt-va108xx check-fmt-va416xx check-fmt-host
+fmt: fmt-va108xx fmt-va416xx fmt-shared-hal fmt-host
+clippy: clippy-va108xx clippy-va416xx clippy-shared-hal clippy-host
 docs: docs-va108xx docs-va416xx docs-shared-hal
-clean: clean-va108xx clean-va416xx clean-shared-hal
+clean: clean-va108xx clean-va416xx clean-shared-hal clean-host
+test: test-host
 
 [working-directory: 'va108xx']
 check-va108xx:
@@ -93,4 +95,24 @@ clean-va416xx:
 
 [working-directory: 'vorago-shared-hal']
 clean-shared-hal:
+  cargo clean
+
+[working-directory: 'host']
+test-host:
+  cargo test
+
+[working-directory: 'host']
+check-fmt-host:
+  cargo fmt --all -- --check
+
+[working-directory: 'host']
+fmt-host:
+  cargo fmt
+
+[working-directory: 'host']
+clippy-host:
+  cargo clippy -- -D warnings
+
+[working-directory: 'host']
+clean-host:
   cargo clean

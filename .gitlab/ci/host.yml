@@ -1,0 +1,22 @@
+# .gitlab/ci/host.yml
+
+host-test:
+  stage: stage2
+  extends: .nextest_setup
+  script:
+    - cd host
+    - cargo nextest run
+
+host-fmt:
+  stage: stage1
+  extends: .common_setup
+  script:
+    - cd host
+    - cargo fmt --all -- --check
+
+host-clippy:
+  stage: stage1
+  extends: .common_setup
+  script:
+    - cd host
+    - cargo clippy -- -D warnings

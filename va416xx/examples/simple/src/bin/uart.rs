@@ -11,10 +11,10 @@ use cortex_m_rt::entry;
 use embedded_hal_nb::serial::Read;
 use embedded_io::Write;
 use simple_examples::peb1;
-use va416xx_hal::clock::ClockConfigurator;
+use va416xx_hal::clock::{ClockConfigurator, ClockSelect};
 use va416xx_hal::pins::PinsG;
 use va416xx_hal::time::Hertz;
-use va416xx_hal::{pac, uart};
+use va416xx_hal::{pac, prelude::*, uart};
 
 #[entry]
 fn main() -> ! {
@@ -22,11 +22,15 @@ fn main() -> ! {
 
     let dp = pac::Peripherals::take().unwrap();
 
-    // Use the external clock connected to XTAL_N.
+    // Feed the external clock connected to XTAL_N into the PLL to get 100 MHz.
     let clocks = ClockConfigurator::new(dp.clkgen)
         .xtal_n_clk_with_src_freq(peb1::EXTCLK_FREQ)
+        .clksel_sys(ClockSelect::Pll)
+        .pll_output_freq(100.MHz())
         .freeze()
         .unwrap();
+    defmt::info!("System clocks: {}", clocks);
+    defmt::info!("Priting hello world to UART and then entering echo mode");
 
     let gpiog = PinsG::new(dp.portg);
 

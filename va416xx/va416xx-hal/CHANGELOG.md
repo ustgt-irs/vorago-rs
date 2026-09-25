@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 # [unreleased]
 
+### Added
+
+- `PllConfig::calculate` and `PllConfig::output_freq` to derive the PLL dividers from the
+  input and requested output frequency. Like the Vorago C HAL, it rejects input frequencies
+  below 4.29688 MHz. Use `ClockConfigurator::pll_cfg` for lower inputs.
+- `ClockConfigurator::pll_output_freq` to let `freeze` calculate the PLL settings.
+- `ClockConfigError::PllCalc` for failed PLL calculations.
+
 ### Changed
 
 - The async SPI driver's interrupt handler no longer takes a critical section on every

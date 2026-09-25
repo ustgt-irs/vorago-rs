@@ -2,7 +2,7 @@ use crate::FunctionSelect;
 use crate::gpio::{DynPinId, IoPeriphPin};
 use crate::{PeripheralSelect, enable_peripheral_clock, pins::AnyPin, sealed::Sealed, time::Hertz};
 use core::{convert::Infallible, fmt::Debug, marker::PhantomData};
-use embedded_hal::spi::{MODE_0, Mode};
+use embedded_hal::spi::Mode;
 
 use regs::{ClockPrescaler, Data, FifoClear, WordSize};
 #[cfg(feature = "vor1x")]
@@ -11,6 +11,8 @@ use va108xx as pac;
 use va416xx as pac;
 
 pub use regs::{Bank, HwChipSelectId};
+
+pub use embedded_hal::spi::{MODE_0, MODE_1, MODE_2, MODE_3};
 
 /// Async SPI support.
 pub mod asynch;

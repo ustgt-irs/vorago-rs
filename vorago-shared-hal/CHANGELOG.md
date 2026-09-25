@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [unreleased]
 
+### Added
+
+- Re-export `MODE_0` to `MODE_3` from `spi`.
+
 ### Changed
 
 - The async SPI driver's interrupt handler no longer takes a critical section on every
