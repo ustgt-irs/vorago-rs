@@ -117,8 +117,8 @@ impl PllConfig {
                 break;
             }
             for fb_div in 1..=64_u64 {
-                let vco_hz = input_hz * fb_div / ref_div;
-                if !(PLL_VCO_MIN_HZ..=PLL_VCO_MAX_HZ).contains(&vco_hz) {
+                let vco_scaled = input_hz * fb_div;
+                if vco_scaled < PLL_VCO_MIN_HZ * ref_div || vco_scaled > PLL_VCO_MAX_HZ * ref_div {
                     continue;
                 }
                 for out_div in 1..=16_u64 {
@@ -216,5 +216,70 @@ mod tests {
             }
         );
         assert_eq!(cfg.output_freq(input), Hertz::from_raw(100_000_000));
+    }
+
+    #[test]
+    fn calculated_config_respects_vco_upper_bound_exactly() {
+        let input = Hertz::from_raw(47_826_087);
+        let target = Hertz::from_raw(55_000_000);
+
+        let cfg = PllConfig::calculate(input, target).unwrap();
+
+        let ref_div = cfg.clkr as u64 + 1;
+        let fb_div = cfg.clkf as u64 + 1;
+
+        assert!(
+            input.to_raw() as u64 * fb_div <= PLL_VCO_MAX_HZ * ref_div,
+            "calculated PLL configuration exceeds VCO maximum: input={} Hz, ref_div={}, fb_div={}",
+            input.to_raw(),
+            ref_div,
+            fb_div
+        );
+    }
+
+    #[test]
+    fn calculated_config_respects_vco_bounds_exactly() {
+        let inputs = [
+            4_296_880,
+            5_000_000,
+            10_000_000,
+            20_000_000,
+            47_826_087,
+            100_000_000,
+        ];
+
+        let targets = [
+            1_000_000,
+            10_000_000,
+            25_000_000,
+            50_000_000,
+            55_000_000,
+            100_000_000,
+        ];
+
+        for input_hz in inputs {
+            for target_hz in targets {
+                let input = Hertz::from_raw(input_hz);
+                let target = Hertz::from_raw(target_hz);
+
+                let Ok(cfg) = PllConfig::calculate(input, target) else {
+                    continue;
+                };
+
+                let ref_div = cfg.clkr as u64 + 1;
+                let fb_div = cfg.clkf as u64 + 1;
+                let vco_scaled = input_hz as u64 * fb_div;
+
+                assert!(
+                    vco_scaled >= PLL_VCO_MIN_HZ * ref_div,
+                    "VCO below minimum: input={input_hz}, target={target_hz}, ref_div={ref_div}, fb_div={fb_div}"
+                );
+
+                assert!(
+                    vco_scaled <= PLL_VCO_MAX_HZ * ref_div,
+                    "VCO above maximum: input={input_hz}, target={target_hz}, ref_div={ref_div}, fb_div={fb_div}"
+                );
+            }
+        }
     }
 }

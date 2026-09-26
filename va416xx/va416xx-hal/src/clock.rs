@@ -203,8 +203,8 @@ impl PllConfig {
                 break;
             }
             for fb_div in 1..=64_u64 {
-                let vco_hz = input_hz * fb_div / ref_div;
-                if !(PLL_VCO_MIN_HZ..=PLL_VCO_MAX_HZ).contains(&vco_hz) {
+                let vco_scaled = input_hz * fb_div;
+                if vco_scaled < PLL_VCO_MIN_HZ * ref_div || vco_scaled > PLL_VCO_MAX_HZ * ref_div {
                     continue;
                 }
                 for out_div in 1..=16_u64 {
