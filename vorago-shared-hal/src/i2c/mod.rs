@@ -341,6 +341,42 @@ pub struct I2cMaster<Addr = SevenBitAddress> {
     addr: PhantomData<Addr>,
 }
 
+fn operation_run(operations: &[Operation<'_>], start: usize) -> Result<(usize, usize), Error> {
+    let Some(first) = operations.get(start) else {
+        return Ok((start, 0));
+    };
+
+    let is_read = matches!(first, Operation::Read(_));
+    let mut end = start;
+    let mut total_len = 0usize;
+
+    while let Some(operation) = operations.get(end) {
+        let same_direction = matches!(
+            (operation, is_read),
+            (Operation::Read(_), true) | (Operation::Write(_), false)
+        );
+
+        if !same_direction {
+            break;
+        }
+
+        let len = match operation {
+            Operation::Read(buf) => buf.len(),
+            Operation::Write(buf) => buf.len(),
+        };
+
+        total_len = total_len.checked_add(len).ok_or(Error::DataTooLarge)?;
+
+        if total_len > 0x7fe {
+            return Err(Error::DataTooLarge);
+        }
+
+        end += 1;
+    }
+
+    Ok((end, total_len))
+}
+
 impl<Addr> I2cMaster<Addr> {
     /// Create a new I2C master driver, taking ownership of the given peripheral instance.
     pub fn new<I2c: I2cInstance>(
@@ -711,6 +747,284 @@ impl<Addr> I2cMaster<Addr> {
         }
     }
 
+    /// Execute one `embedded-hal` transaction while preserving transaction
+    /// boundaries across adjacent operations.
+    ///
+    /// Adjacent operations with the same direction are emitted as one hardware
+    /// phase. A direction change issues a repeated START, and only the final
+    /// phase emits STOP.
+    fn transaction_blocking(
+        &mut self,
+        address: I2cAddress,
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), Error> {
+        let mut start = 0;
+
+        while start < operations.len() {
+            let is_read = matches!(&operations[start], Operation::Read(_));
+
+            let (end, total_len) = operation_run(operations, start)?;
+
+            // Empty operations carry no data and do not require a hardware phase.
+            if total_len == 0 {
+                start = end;
+                continue;
+            }
+
+            let is_last = end == operations.len();
+
+            if is_read {
+                self.read_operation_run(address, &mut operations[start..end], total_len, is_last)?;
+            } else {
+                self.write_operation_run(address, &operations[start..end], total_len, is_last)?;
+            }
+
+            start = end;
+        }
+
+        Ok(())
+    }
+
+    /// Execute a contiguous run of write operations as a single I2C phase.
+    fn write_operation_run(
+        &mut self,
+        address: I2cAddress,
+        operations: &[Operation<'_>],
+        total_len: usize,
+        is_last: bool,
+    ) -> Result<(), Error> {
+        if total_len > 0x7fe {
+            return Err(Error::DataTooLarge);
+        }
+
+        self.clear_tx_fifo();
+
+        let timeout_guard = TimeoutGuard::new(&self.regs);
+
+        self.regs
+            .write_words(regs::Words::new(u11::new(total_len as u16)));
+
+        let mut operation_index = 0usize;
+        let mut byte_index = 0usize;
+
+        let mut next_byte = || -> Option<u8> {
+            loop {
+                if operation_index >= operations.len() {
+                    return None;
+                }
+
+                match &operations[operation_index] {
+                    Operation::Write(buf) => {
+                        if byte_index < buf.len() {
+                            let byte = buf[byte_index];
+                            byte_index += 1;
+                            return Some(byte);
+                        }
+
+                        operation_index += 1;
+                        byte_index = 0;
+                    }
+                    Operation::Read(_) => {
+                        unreachable!("write_operation_run received a read operation")
+                    }
+                }
+            }
+        };
+
+        const FILL_DEPTH: usize = 12;
+        let initial_fill = core::cmp::min(FILL_DEPTH, total_len);
+
+        for _ in 0..initial_fill {
+            let byte = next_byte().expect("write operation run length must match buffers");
+            self.write_fifo_unchecked(byte);
+        }
+
+        let mut written = initial_fill;
+
+        self.write_address(address, regs::Direction::Send);
+
+        let init_cmd = if is_last {
+            I2cCommand::StartWithStop
+        } else {
+            I2cCommand::Start
+        };
+
+        self.write_command(init_cmd);
+
+        loop {
+            let status = self.regs.read_status();
+
+            if status.arb_lost() {
+                self.error_handler_write(init_cmd);
+                return Err(Error::ArbitrationLost);
+            }
+
+            if status.nack_addr() {
+                self.error_handler_write(init_cmd);
+                return Err(Error::NackAddr);
+            }
+
+            if status.nack_data() {
+                self.error_handler_write(init_cmd);
+                return Err(Error::NackData);
+            }
+
+            if is_last {
+                if status.idle() {
+                    return Ok(());
+                }
+            } else if status.waiting() {
+                return Ok(());
+            }
+
+            if timeout_guard.timeout_enabled() && self.regs.read_interrupt_status().clock_timeout()
+            {
+                self.error_handler_write(init_cmd);
+                return Err(Error::ClockTimeout(
+                    self.regs.read_clk_timeout_limit().value(),
+                ));
+            }
+
+            if status.tx_not_full() && written < total_len {
+                let byte = next_byte().expect("write operation run length must match buffers");
+                self.write_fifo_unchecked(byte);
+                written += 1;
+            }
+        }
+    }
+
+    /// Store one received byte in a contiguous run of read operations.
+    fn store_transaction_read_byte(
+        operations: &mut [Operation<'_>],
+        operation_index: &mut usize,
+        byte_index: &mut usize,
+        byte: u8,
+    ) {
+        loop {
+            match &mut operations[*operation_index] {
+                Operation::Read(buf) => {
+                    if *byte_index < buf.len() {
+                        buf[*byte_index] = byte;
+                        *byte_index += 1;
+                        return;
+                    }
+
+                    *operation_index += 1;
+                    *byte_index = 0;
+                }
+                Operation::Write(_) => {
+                    unreachable!("read_operation_run received a write operation")
+                }
+            }
+        }
+    }
+
+    /// Execute a contiguous run of read operations as a single I2C phase.
+    fn read_operation_run(
+        &mut self,
+        address: I2cAddress,
+        operations: &mut [Operation<'_>],
+        total_len: usize,
+        is_last: bool,
+    ) -> Result<(), Error> {
+        if total_len > 0x7fe {
+            return Err(Error::DataTooLarge);
+        }
+
+        self.clear_rx_fifo();
+
+        let timeout_guard = TimeoutGuard::new(&self.regs);
+
+        self.regs
+            .write_words(regs::Words::new(u11::new(total_len as u16)));
+
+        self.write_address(address, regs::Direction::Receive);
+
+        let init_cmd = if is_last {
+            I2cCommand::StartWithStop
+        } else {
+            I2cCommand::Start
+        };
+
+        self.write_command(init_cmd);
+
+        let mut operation_index = 0usize;
+        let mut byte_index = 0usize;
+        let mut read_bytes = 0usize;
+
+        loop {
+            let status = self.read_status();
+
+            if status.arb_lost() {
+                if !is_last {
+                    self.write_command(I2cCommand::Stop);
+                }
+                self.clear_rx_fifo();
+                return Err(Error::ArbitrationLost);
+            }
+
+            if status.nack_addr() {
+                if !is_last {
+                    self.write_command(I2cCommand::Stop);
+                }
+                self.clear_rx_fifo();
+                return Err(Error::NackAddr);
+            }
+
+            let complete = if is_last {
+                status.idle()
+            } else {
+                status.waiting()
+            };
+
+            if complete {
+                while self.read_status().rx_not_empty() && read_bytes < total_len {
+                    let byte = self.read_fifo_unchecked();
+
+                    Self::store_transaction_read_byte(
+                        operations,
+                        &mut operation_index,
+                        &mut byte_index,
+                        byte,
+                    );
+
+                    read_bytes += 1;
+                }
+
+                if read_bytes != total_len {
+                    return Err(Error::InsufficientDataReceived);
+                }
+
+                return Ok(());
+            }
+
+            if timeout_guard.timeout_enabled() && self.regs.read_interrupt_status().clock_timeout()
+            {
+                if !is_last {
+                    self.write_command(I2cCommand::Stop);
+                }
+                self.clear_rx_fifo();
+
+                return Err(Error::ClockTimeout(
+                    self.regs.read_clk_timeout_limit().value(),
+                ));
+            }
+
+            if status.rx_not_empty() && read_bytes < total_len {
+                let byte = self.read_fifo_unchecked();
+
+                Self::store_transaction_read_byte(
+                    operations,
+                    &mut operation_index,
+                    &mut byte_index,
+                    byte,
+                );
+
+                read_bytes += 1;
+            }
+        }
+    }
+
     /// Blocking write-read transaction on the I2C bus.
     pub fn write_read_blocking(
         &mut self,
@@ -760,13 +1074,7 @@ impl embedded_hal::i2c::I2c for I2cMaster<SevenBitAddress> {
         address: SevenBitAddress,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
-        for operation in operations {
-            match operation {
-                Operation::Read(buf) => self.read_blocking(I2cAddress::Regular(address), buf)?,
-                Operation::Write(buf) => self.write_blocking(I2cAddress::Regular(address), buf)?,
-            }
-        }
-        Ok(())
+        self.transaction_blocking(I2cAddress::Regular(address), operations)
     }
 
     fn write_read(
@@ -790,13 +1098,7 @@ impl embedded_hal::i2c::I2c<TenBitAddress> for I2cMaster<TenBitAddress> {
         address: TenBitAddress,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
-        for operation in operations {
-            match operation {
-                Operation::Read(buf) => self.read_blocking(I2cAddress::TenBit(address), buf)?,
-                Operation::Write(buf) => self.write_blocking(I2cAddress::TenBit(address), buf)?,
-            }
-        }
-        Ok(())
+        self.transaction_blocking(I2cAddress::TenBit(address), operations)
     }
 
     fn write_read(
@@ -807,5 +1109,107 @@ impl embedded_hal::i2c::I2c<TenBitAddress> for I2cMaster<TenBitAddress> {
     ) -> Result<(), Self::Error> {
         let addr = I2cAddress::TenBit(address);
         self.write_read_blocking(addr, write, read)
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    #[test]
+    fn groups_adjacent_writes() {
+        let a = [1u8, 2];
+        let b = [3u8, 4, 5];
+        let operations = [Operation::Write(&a), Operation::Write(&b)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 5)));
+    }
+
+    #[test]
+    fn groups_adjacent_reads() {
+        let mut a = [0u8; 2];
+        let mut b = [0u8; 3];
+        let operations = [Operation::Read(&mut a), Operation::Read(&mut b)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 5)));
+    }
+
+    #[test]
+    fn stops_at_direction_change() {
+        let write = [1u8, 2];
+        let mut read = [0u8; 3];
+
+        let operations = [Operation::Write(&write), Operation::Read(&mut read)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((1, 2)));
+        assert_eq!(operation_run(&operations, 1), Ok((2, 3)));
+    }
+
+    #[test]
+    fn handles_multiple_direction_changes() {
+        let w1 = [1u8; 2];
+        let w2 = [2u8; 3];
+        let mut r1 = [0u8; 4];
+        let mut r2 = [0u8; 5];
+        let w3 = [3u8; 1];
+
+        let operations = [
+            Operation::Write(&w1),
+            Operation::Write(&w2),
+            Operation::Read(&mut r1),
+            Operation::Read(&mut r2),
+            Operation::Write(&w3),
+        ];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 5)));
+        assert_eq!(operation_run(&operations, 2), Ok((4, 9)));
+        assert_eq!(operation_run(&operations, 4), Ok((5, 1)));
+    }
+
+    #[test]
+    fn accepts_maximum_supported_run_length() {
+        let a = [0u8; 1024];
+        let b = [0u8; 1022];
+
+        let operations = [Operation::Write(&a), Operation::Write(&b)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 0x7fe)));
+    }
+
+    #[test]
+    fn rejects_oversized_run_length() {
+        let a = [0u8; 1024];
+        let b = [0u8; 1023];
+
+        let operations = [Operation::Write(&a), Operation::Write(&b)];
+
+        assert_eq!(operation_run(&operations, 0), Err(Error::DataTooLarge));
+    }
+
+    #[test]
+    fn handles_empty_operation_slice() {
+        let operations: [Operation<'_>; 0] = [];
+
+        assert_eq!(operation_run(&operations, 0), Ok((0, 0)));
+    }
+
+    #[test]
+    fn groups_all_empty_operations_as_zero_length_run() {
+        let a: [u8; 0] = [];
+        let b: [u8; 0] = [];
+
+        let operations = [Operation::Write(&a), Operation::Write(&b)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 0)));
+    }
+
+    #[test]
+    fn includes_empty_buffers_in_same_run() {
+        let empty: [u8; 0] = [];
+        let data = [1u8, 2, 3];
+
+        let operations = [Operation::Write(&empty), Operation::Write(&data)];
+
+        assert_eq!(operation_run(&operations, 0), Ok((2, 3)));
     }
 }
