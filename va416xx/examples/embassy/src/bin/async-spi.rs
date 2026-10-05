@@ -34,6 +34,9 @@ use va416xx_hal::{
 /// handlers, which do not have access to the [spi::asynch::Spi] driver itself.
 static SPI_TOKEN: OnceCell<spi::Bank> = OnceCell::new();
 
+/// Without loopback mode, MOSI and MISO need to be tied together for the transfer checks.
+const LOOPBACK_MODE: bool = true;
+
 /// Drop a transfer future which is still in flight, once per cycle.
 ///
 /// The future prefills the FIFO and releases the TX pause when it is constructed, so the frame
@@ -67,6 +70,7 @@ async fn main(_spawner: Spawner) {
     let spi_clk_cfg = spi::ClockConfig::from_clks(&clocks, 1.MHz()).unwrap();
     let mut spi_cfg = spi::Config::default();
     spi_cfg.clock = spi_clk_cfg;
+    spi_cfg.loopback_mode = LOOPBACK_MODE;
     let (sck, miso, mosi) = (porta.pa5, porta.pa6, porta.pa7);
     let mut spi = spi::Spi::<u8>::new_for_spi2(dp.spi2, (sck, miso, mosi), spi_cfg).into_async();
 
@@ -82,8 +86,21 @@ async fn main(_spawner: Spawner) {
     let buf: [u8; 4] = [0xAA; 4];
     let cancel_buf: [u8; 32] = [0x55; 32];
     loop {
-        spi.write(&buf).await.expect("spi transfer failed");
-        defmt::info!("async SPI transfer done");
+        spi.write(&buf).await.expect("spi write failed");
+
+        let tx_buf: [u8; 4] = [1, 2, 3, 4];
+        let mut rx_buf: [u8; 4] = [0; 4];
+        spi.transfer(&mut rx_buf, &tx_buf)
+            .await
+            .expect("spi transfer failed");
+        assert_eq!(rx_buf, tx_buf);
+
+        let mut inplace_buf = tx_buf;
+        spi.transfer_in_place(&mut inplace_buf)
+            .await
+            .expect("spi transfer in place failed");
+        assert_eq!(inplace_buf, tx_buf);
+        defmt::info!("async SPI transfers successful");
 
         if TEST_TRANSFER_CANCELLATION {
             drop(spi.write(&cancel_buf));

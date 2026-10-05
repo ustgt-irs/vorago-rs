@@ -43,7 +43,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   `SpiClockConfig` was renamed to `ClockConfig`.
 - The async SPI driver now always enables blockmode and blockmode stalling. It marks the last
   word of a transfer with the BMSTART_BMSTOP bit, which ends the frame and deasserts a hardware
-  chip select. This overrides the `blockmode` and `bmstall` settings of the passed `Config`.
+  chip select.
+- The blocking SPI driver now always enables blockmode and blockmode stalling as well. Removed
+  `blockmode` and `bmstall` from `Config` and `TransferConfig`, and the matching parameters of
+  `TransferConfig::new_with_hw_cs`.
+- Blocking SPI transfers now pre-fill the whole FIFO and keep at most `FIFO_DEPTH` words unread,
+  so the RX FIFO can not overrun.
+- Blocking SPI `transfer` now sends the fill word instead of 0 when `write` is shorter than `read`.
+- `SpiWord` no longer requires `TryFrom<u32>`. It has a new `from_raw` method instead.
 - The async UART TX driver's interrupt handler no longer takes a critical section on every
   interrupt either. The shared transfer state moved from a `Mutex<RefCell<TxContext>>` to plain
   atomics, gated the same way as the SPI driver. This also drops the `raw-buffer` dependency.
@@ -99,6 +106,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - An I2C clock timeout now cancels the transfer and clears the FIFO
 - I2C `DataTooLarge` is now checked before any bus activity.
 - The I2C bus is now released after an error in the middle of a transaction.
+- Blocking SPI transfers longer than 12 words are no longer split into two blockmode frames.
+- Blocking SPI `transfer` with `read` longer than `write` now ends the frame after the last word.
+  An empty `write` no longer panics.
 
 ## [v0.5.0] 2026-07-14
 
