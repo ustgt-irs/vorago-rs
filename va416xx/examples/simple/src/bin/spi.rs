@@ -32,12 +32,11 @@ pub enum ExampleSelect {
 const EXAMPLE_SEL: ExampleSelect = ExampleSelect::Loopback;
 const SPI_SPEED_KHZ: u32 = 1000;
 const SPI_MODE: Mode = MODE_0;
-const BLOCKMODE: bool = true;
 const FILL_WORD: u8 = 0x0f;
 
 #[entry]
 fn main() -> ! {
-    defmt::println!("-- VA108xx SPI example application--");
+    defmt::println!("-- VA416xx SPI example application --");
     let dp = pac::Peripherals::take().unwrap();
     // Use the external clock connected to XTAL_N.
     let clocks = ClockConfigurator::new(dp.clkgen)
@@ -52,7 +51,6 @@ fn main() -> ! {
     let mut spi_cfg = spi::Config::default();
     spi_cfg.clock =
         spi::ClockConfig::from_clks(&clocks, SPI_SPEED_KHZ.kHz()).expect("invalid target clock");
-    spi_cfg.blockmode = BLOCKMODE;
     spi_cfg.mode = SPI_MODE;
 
     if EXAMPLE_SEL == ExampleSelect::Loopback {
@@ -78,6 +76,7 @@ fn main() -> ! {
 
         spi0.transfer(&mut rx_buf, &tx_buf);
         assert_eq!(rx_buf, [1, 2, 3, 0]);
+        defmt::info!("SPI transfers successful");
         delay.delay_ms(500);
     }
 }

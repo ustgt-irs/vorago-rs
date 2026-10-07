@@ -36,7 +36,6 @@ const EXAMPLE_SEL: ExampleSelect = ExampleSelect::Loopback;
 const SPI_BUS_SEL: SpiBusSelect = SpiBusSelect::SpiBPortB;
 const SPI_SPEED_KHZ: u32 = 1000;
 const SPI_MODE: Mode = MODE_0;
-const BLOCKMODE: bool = true;
 const FILL_WORD: u8 = 0x0f;
 
 #[entry]
@@ -83,8 +82,6 @@ fn main() -> ! {
                 clk_cfg: Some(spi_clk_cfg),
                 mode: Some(SPI_MODE),
                 sod: true,
-                blockmode: BLOCKMODE,
-                bmstall: true,
                 hw_cs: None,
             };
             spi.configure_transfer(&transfer_cfg);
@@ -95,8 +92,6 @@ fn main() -> ! {
                 clk_cfg: Some(spi_clk_cfg),
                 mode: Some(SPI_MODE),
                 sod: false,
-                blockmode: BLOCKMODE,
-                bmstall: true,
                 hw_cs: Some(hw_cs_pin),
             };
             spi.configure_transfer(&transfer_cfg);
