@@ -13,6 +13,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va416xx
       - run: cargo check --target thumbv7em-none-eabihf
       - run: cargo check --target thumbv7em-none-eabihf --examples
       - run: cargo check -p va416xx --target thumbv7em-none-eabihf --all-features
@@ -26,6 +29,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va416xx
       - uses: taiki-e/install-action@v2
         with:
           tool: flip-link
@@ -39,6 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va416xx
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --features va41630 -p va416xx-hal
@@ -61,6 +70,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: "thumbv7em-none-eabihf"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va416xx
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p va416xx
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p va416xx-hal --features va41630 --no-deps
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p vorago-peb1 --no-deps
@@ -73,4 +85,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va416xx
       - run: cargo clippy --target thumbv7em-none-eabihf -- -D warnings

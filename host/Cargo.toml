@@ -1,3 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["pll-calc"]
+members = [
+  "pll-calc",
+  "uart-clock-calc",
+  "flashloader-types",
+  "flashloader-client",
+]

@@ -24,7 +24,7 @@ serde = { version = "1", default-features = false }
 # Even though we do not use this directly, we need to activate this feature explicitely
 # so that RTIC compiles because thumv6 does not have CAS operations natively.
 portable-atomic = {version = "1", features = ["unsafe-assume-single-core"]}
-models = { path = "./models", features = ["defmt"] }
+flashloader-types = { path = "../../host/flashloader-types", features = ["defmt"] }
 
 rtic = { version = "2", features = ["thumbv6-backend"] }
 

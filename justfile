@@ -35,6 +35,17 @@ build-va108xx:
 build-va416xx:
   cargo build --target thumbv7em-none-eabihf
 
+# Bootloader, flashloader and both slot-blinky images for testing the VA416xx flashloader.
+[working-directory: 'va416xx']
+flashloader-test-va416xx:
+  mkdir -p target/flashloader-test
+  cargo build --release -p bootloader -p flashloader
+  cp target/thumbv7em-none-eabihf/release/bootloader target/thumbv7em-none-eabihf/release/flashloader target/flashloader-test/
+  cd flashloader/slot-blinky && cargo build --release --features slot-a
+  cp flashloader/slot-blinky/target/thumbv7em-none-eabihf/release/slot-blinky target/flashloader-test/slot-blinky-a
+  cd flashloader/slot-blinky && cargo build --release --features slot-b
+  cp flashloader/slot-blinky/target/thumbv7em-none-eabihf/release/slot-blinky target/flashloader-test/slot-blinky-b
+
 [working-directory: 'va108xx']
 check-fmt-va108xx:
   cargo fmt --all -- --check

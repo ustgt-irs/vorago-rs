@@ -10,11 +10,9 @@ members = [
   "board-tests",
   "bootloader",
   "flashloader",
-  "flashloader/models",
 ]
 exclude = [
-  "flashloader/slot-a-blinky",
-  "flashloader/slot-b-blinky",
+  "flashloader/slot-blinky",
 ]
 
 [profile.dev]

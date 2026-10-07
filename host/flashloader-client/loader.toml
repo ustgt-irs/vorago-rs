@@ -1,0 +1,3 @@
+# "va108xx" or "va416xx"
+chip = "va416xx"
+serial_port = "/dev/ttyUSB0"

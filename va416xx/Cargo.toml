@@ -11,8 +11,7 @@ members = [
   "examples/rtic",
 ]
 exclude = [
-  "flashloader/slot-a-blinky",
-  "flashloader/slot-b-blinky",
+  "flashloader/slot-blinky",
 ]
 
 [profile.dev]

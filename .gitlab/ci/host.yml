@@ -1,8 +1,16 @@
 # .gitlab/ci/host.yml
 
+# `serialport` needs libudev on Linux.
+.host_deps:
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends libudev-dev pkg-config
+
 host-test:
   stage: stage2
   extends: .nextest_setup
+  before_script:
+    - !reference [.nextest_setup, before_script]
+    - !reference [.host_deps, before_script]
   script:
     - cd host
     - cargo nextest run
@@ -17,6 +25,8 @@ host-fmt:
 host-clippy:
   stage: stage1
   extends: .common_setup
+  before_script:
+    - !reference [.host_deps, before_script]
   script:
     - cd host
     - cargo clippy -- -D warnings
