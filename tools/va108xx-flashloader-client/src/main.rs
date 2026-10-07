@@ -20,7 +20,7 @@ pub mod tc;
 #[derive(clap::Parser)]
 #[command(name = "image-loader", about = "VA416XX Image Loader Application")]
 pub struct Cli {
-    /// Serial port to use (overrides loader.toml)
+    /// Serial port to use (overrides config.toml)
     #[arg(short, long)]
     pub port: Option<String>,
 
@@ -118,13 +118,14 @@ fn main() -> anyhow::Result<()> {
     setup_logger().expect("failed to initialize logger");
     println!("-- VA108xx Flashloader Client --");
     let cli = Cli::parse();
-    let config = Config::new_from_file();
-
-    if config.interface.serial_port.is_none() {
-        bail!("Serial port not specified in configuration file.");
-    }
-    let serial_port = config.interface.serial_port.as_ref().unwrap();
-    let serial = serialport::new(serial_port, 115200)
+    let serial_port = match cli.port {
+        Some(port) => port,
+        None => match Config::new_from_file().interface.serial_port {
+            Some(port) => port,
+            None => bail!("Serial port not specified in configuration file."),
+        },
+    };
+    let serial = serialport::new(&serial_port, 115200)
         .open()
         .expect("opening serial port failed");
     let mut transport = PacketTransportSerialCobs::new(serial, CobsDecoderOwned::new(4096));
@@ -157,7 +158,7 @@ fn main() -> anyhow::Result<()> {
                 AppTarget::A => models::AppSel::A,
                 AppTarget::B => models::AppSel::B,
             };
-            let tc = tc::create_tc(&models::Request::SetBootSlot(app_sel));
+            let tc = tc::create_tc(&models::Request::Corrupt(app_sel));
             log::info!(
                 "Sending corrupt slot {:?} command with TC ID: {:#010x}",
                 app_sel,

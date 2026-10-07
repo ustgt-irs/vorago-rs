@@ -46,9 +46,9 @@ const APP_A_START_ADDR: u32 = BOOTLOADER_END_ADDR;
 // The actual size of the image which is relevant for CRC calculation will be store at this
 // address.
 // 0x21FF8
-const APP_A_SIZE_ADDR: u32 = APP_B_END_ADDR - 8;
+const APP_A_SIZE_ADDR: u32 = APP_A_END_ADDR - 8;
 // 0x21FFC
-const APP_A_CRC_ADDR: u32 = APP_B_END_ADDR - 4;
+const APP_A_CRC_ADDR: u32 = APP_A_END_ADDR - 4;
 pub const APP_A_END_ADDR: u32 = BOOTLOADER_END_ADDR + APP_IMG_SZ;
 
 //  0x22000
@@ -62,9 +62,11 @@ const APP_B_CRC_ADDR: u32 = APP_B_END_ADDR - 4;
 // 0x40000
 pub const APP_B_END_ADDR: u32 = NVM_SIZE;
 
-pub const APP_IMG_SZ: u32 = APP_B_END_ADDR - APP_A_START_ADDR / 2;
+pub const APP_IMG_SZ: u32 = (APP_B_END_ADDR - APP_A_START_ADDR) / 2;
 
 static_assertions::const_assert!((APP_B_END_ADDR - BOOTLOADER_END_ADDR).is_multiple_of(2));
+static_assertions::const_assert_eq!(APP_A_END_ADDR, 0x22000);
+static_assertions::const_assert_eq!(APP_A_CRC_ADDR, 0x21FFC);
 
 pub const VECTOR_TABLE_OFFSET: u32 = 0x0;
 pub const VECTOR_TABLE_LEN: u32 = 0x350;
