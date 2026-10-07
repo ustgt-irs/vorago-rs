@@ -17,6 +17,6 @@ cobs = "0.5"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 spacepackets = { version = "0.17" }
-tmtc-utils = { git = "https://egit.irs.uni-stuttgart.de/rust/tmtc-utils.git", version = "0.1" }
+tmtc-utils = { git = "https://egit.irs.uni-stuttgart.de/rust/sat-rs.git", version = "0.1" }
 
 models = { path = "../../va108xx/flashloader/models" }

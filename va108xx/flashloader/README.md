@@ -2,9 +2,9 @@ VA108xx Flashloader Application
 ========
 
 This flashloader shows a minimal example for a self-updatable Rust software which exposes
-a simple PUS (CCSDS) interface to update the software. It also provides a Rust application
+a simple CCSDS packet interface to update the software. It also provides a Rust application
 which can be used to upload compiled images to the flashloader application to write them to the NVM.
-You can find it inside the `tools/va108xx-image-loader` directory of the monorepo.
+You can find it inside the `tools/va108xx-flashloader-client` directory of the monorepo.
 
 Please note that the both the application and the image loader are tailored towards usage
 with the [bootloader provided by this repository](https://github.com/ustgt-irs/vorago-rs/tree/main/va108xx/bootloader).
