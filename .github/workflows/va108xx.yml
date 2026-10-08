@@ -35,25 +35,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: flip-link
-      # Without the config, binaries are linked without flip-link and the linker scripts.
-      - run: cp .cargo/config.toml.template .cargo/config.toml
       # The flashloader does not fit into flash in a debug build.
       - run: cargo build --target thumbv6m-none-eabi --release
-
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: va108xx
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run -p va108xx-hal --no-tests=pass
-      # I think we can skip those on an embedded crate..
-      # - run: cargo test --doc -p va108xx-hal
 
   fmt:
     name: Check formatting

@@ -40,6 +40,9 @@ This monorepo is structured to contain the following top-level components:
   VA416xx family
 - [`host`](host): Code that also runs on your development computer
 
+The READMEs of the [`va108xx`](va108xx/README.md) and [`va416xx`](va416xx/README.md) workspaces
+explain how to build, flash and run software on the boards.
+
 ## Embedded Rust Learning Resources
 
 If you are new to embedded Rust, these resources are a good starting point:

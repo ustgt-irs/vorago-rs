@@ -37,17 +37,9 @@ The majority of the HAL implementation and the Embassy-rs support are contained 
 
 ## Using the `.cargo/config.toml` file
 
-`va108xx-hal`'s `build.rs` copies `.cargo/config.toml.template` to `.cargo/config.toml`
-automatically on first build, so you only need to run this manually if you want to reset it:
-
-```sh
-cp .cargo/config.toml.template .cargo/config.toml
-```
-
-You then can adapt the `config.toml` to your needs. For example, you can configure runners
-to conveniently flash with `cargo run`. On a fresh clone, the very first `cargo build` may still
-fail with a target-related error, since Cargo picks the target before the build script can create
-`config.toml`. Just run it again.
+The `.cargo/config.toml` file sets the build target, the linker scripts and a `probe-rs` runner.
+You can adapt it to your needs. For example, you can configure runners to conveniently flash with
+`cargo run`.
 
 ## Using the sample VS Code files
 
@@ -61,14 +53,8 @@ You can then adapt the files in `.vscode` to your needs.
 
 ## Building projects
 
-Building an application requires the `thumbv6m-none-eabi` cross-compiler toolchain.
-If you have not installed it yet, you can do so with
-
-```sh
-rustup target add thumbv6m-none-eabi
-```
-
-After that, you can use `cargo build` to build the development version of the crate.
+The `rust-toolchain.toml` file makes `rustup` install the `thumbv6m-none-eabi` target
+automatically, so you can directly use `cargo build` to build the development version of the crate.
 For example, you can use
 
 ```sh
@@ -83,7 +69,9 @@ You can use CLI or VS Code for flashing, running and debugging.
 
 ### Using CLI with probe-rs
 
-Install [probe-rs](https://probe.rs/docs/getting-started/installation/) first.
+Install [probe-rs](https://probe.rs/docs/getting-started/installation/) first. On Linux, you also
+need to install the [udev rules](https://probe.rs/docs/getting-started/probe-setup/#linux-udev-rules)
+so that your user can access the debug probe.
 
 You can use `probe-rs` to run the software and display RTT log output. However, debugging does not
 work yet.
@@ -97,7 +85,7 @@ probe-rs run --chip VA108xx_RAM --protocol jtag target/thumbv6m-none-eabi/debug/
 to flash and run the blinky program on the RAM. There is also a `VA108xx` chip target
 available for persistent flashing (see note below!).
 
-Runner configuration is available in the `.cargo/config.toml.template` file to use `probe-rs` for
+Runner configuration is available in the `.cargo/config.toml` file to use `probe-rs` for
 convenience. `probe-rs` is also able to process and display `defmt` strings directly.
 
 Special note on the `VA108xx` target: This target allows flashing the NVM, but doing a soft reset

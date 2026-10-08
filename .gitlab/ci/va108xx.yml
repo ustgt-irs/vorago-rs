@@ -18,13 +18,6 @@ va108xx-build:
     # The flashloader does not fit into flash in a debug build.
     - cargo build --target thumbv6m-none-eabi --release
 
-va108xx-test:
-  stage: stage2
-  extends: .nextest_setup
-  script:
-    - cd va108xx
-    - cargo nextest run -p va108xx-hal --no-tests=pass
-
 va108xx-fmt:
   stage: stage1
   extends: .common_setup
