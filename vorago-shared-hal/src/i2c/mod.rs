@@ -339,13 +339,9 @@ impl TimeoutGuard {
         };
         if clk_timeout_enabled {
             // Clear any interrupts which might be pending.
-            guard.regs.write_interrupt_clear(
-                regs::InterruptClear::builder()
-                    .with_clock_timeout(true)
-                    .with_tx_overflow(false)
-                    .with_rx_overflow(false)
-                    .build(),
-            );
+            guard
+                .regs
+                .write_interrupt_clear(regs::InterruptClear::DEFAULT.with_clock_timeout(true));
             guard.regs.modify_interrupt_enable(|mut value| {
                 value.set_clock_timeout(true);
                 value

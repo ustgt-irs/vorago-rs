@@ -386,9 +386,34 @@ pub mod types {
     }
 
     /// IRQ_CLEAR register.
+    ///
+    /// The status interrupts in bits 0 to 6 latch on a rising edge of the matching [Status] bit
+    /// and stay pending until cleared here. The VA416xx programmers guide claims writes to these
+    /// bits have no effect, but clearing them works on the hardware.
     #[bitbybit::bitfield(u32, default = 0x0)]
     #[derive(Debug)]
     pub struct InterruptClear {
+        /// Clear the I2C idle interrupt.
+        #[bit(0, w)]
+        i2c_idle: bool,
+        /// Clear the idle interrupt.
+        #[bit(1, w)]
+        idle: bool,
+        /// Clear the waiting interrupt.
+        #[bit(2, w)]
+        waiting: bool,
+        /// Clear the stalled interrupt.
+        #[bit(3, w)]
+        stalled: bool,
+        /// Clear the arbitration lost interrupt.
+        #[bit(4, w)]
+        arb_lost: bool,
+        /// Clear the address NACK interrupt.
+        #[bit(5, w)]
+        nack_addr: bool,
+        /// Clear the data NACK interrupt.
+        #[bit(6, w)]
+        nack_data: bool,
         /// Clear the clock timeout interrupt.
         #[bit(7, w)]
         clock_timeout: bool,
@@ -403,6 +428,13 @@ pub mod types {
     impl InterruptClear {
         /// Clear all interrupts.
         pub const ALL: Self = Self::builder()
+            .with_i2c_idle(true)
+            .with_idle(true)
+            .with_waiting(true)
+            .with_stalled(true)
+            .with_arb_lost(true)
+            .with_nack_addr(true)
+            .with_nack_data(true)
             .with_clock_timeout(true)
             .with_tx_overflow(true)
             .with_rx_overflow(true)
