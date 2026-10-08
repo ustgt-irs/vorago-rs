@@ -13,6 +13,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf, thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vorago-shared-hal
       - run: cargo check --target thumbv7em-none-eabihf --features "vor4x, defmt"
       - run: cargo check --target thumbv6m-none-eabi --features "vor1x, defmt"
 
@@ -32,6 +35,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: "thumbv7em-none-eabihf, thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vorago-shared-hal
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --target thumbv7em-none-eabihf --features "vor4x, defmt" --no-deps
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc --target thumbv6m-none-eabi --features "vor1x, defmt" --no-deps
 
@@ -43,5 +49,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv7em-none-eabihf, thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vorago-shared-hal
       - run: cargo clippy --target thumbv7em-none-eabihf --features vor4x -- -D warnings
       - run: cargo clippy --target thumbv6m-none-eabi --features vor1x -- -D warnings

@@ -13,6 +13,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va108xx
       - run: cargo check --target thumbv6m-none-eabi
       - run: cargo check --target thumbv6m-none-eabi --examples
       - run: cargo check -p va108xx --target thumbv6m-none-eabi --all-features
@@ -26,6 +29,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va108xx
       - uses: taiki-e/install-action@v2
         with:
           tool: flip-link
@@ -40,6 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va108xx
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run -p va108xx-hal --no-tests=pass
@@ -64,6 +73,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: "thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va108xx
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p va108xx --all-features
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p va108xx-hal --features "defmt, embassy-oc30-oc31" --no-deps
       - run: RUSTDOCFLAGS="--cfg docsrs --generate-link-to-definition -Z unstable-options" cargo +nightly doc -p vorago-reb1 --no-deps
@@ -76,4 +88,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: "thumbv6m-none-eabi"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: va108xx
       - run: cargo clippy --target thumbv6m-none-eabi -- -D warnings

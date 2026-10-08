@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 cortex-m = "0.7"
+# Not used directly. The feature makes the image set VTOR itself, no matter who started it.
+cortex-m-rt = { version = "0.7", features = ["set-vtor"] }
 embedded-io = "0.7"
 defmt-rtt = "1"
 defmt = "1"
@@ -13,11 +15,12 @@ static_cell = "2"
 fugit = "0.5"
 ringbuf = { version = "0.5", default-features = false }
 once_cell = { version = "1", default-features = false, features = ["critical-section"] }
-satrs = { version = "0.3.0-alpha.3", default-features = false, features = ["defmt"] }
+postcard = { version = "1", features = ["use-defmt"] }
+spacepackets = { version = "0.18", default-features = false, features = ["defmt"] }
 cobs = { version = "0.5", default-features = false }
-arbitrary-int = "2"
+flashloader-types = { path = "../../host/flashloader-types", features = ["defmt"] }
 
-va416xx-hal = { version = "0.7", features = ["va41630", "defmt"], path = "../va416xx-hal" }
+va416xx-hal = { version = "0.7", features = ["va41630", "defmt", "time-driver-tim14-tim15"], path = "../va416xx-hal" }
 
 rtic = { version = "2", features = ["thumbv7-backend"] }
-rtic-monotonics = { version = "2", features = ["cortex-m-systick"] }
+embassy-time = { version = "0.5", features = ["tick-hz-1_000", "generic-queue-8"] }

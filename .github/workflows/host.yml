@@ -11,8 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+      # `serialport` needs libudev on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - run: cargo nextest run
 
   fmt:
@@ -29,4 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+      # `serialport` needs libudev on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - run: cargo clippy -- -D warnings

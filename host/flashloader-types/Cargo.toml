@@ -1,0 +1,16 @@
+[package]
+name = "flashloader-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+postcard = { version = "1" }
+spacepackets = { version = "0.18", default-features = false }
+defmt = { version = "1", optional = true }
+serde = { version = "1", default-features = false, features = ["derive"] }
+cobs = { version = "0.5", default-features = false }
+thiserror = { version = "2", default-features = false }
+arbitrary-int = "2"
+
+[features]
+defmt = ["dep:defmt", "spacepackets/defmt", "cobs/defmt"]

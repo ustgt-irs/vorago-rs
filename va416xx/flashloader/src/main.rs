@@ -6,14 +6,14 @@
 //!
 //! Bootloader memory map
 //!
-//! * <0x0>     Bootloader start                         <code up to 0x3FFE bytes>
-//! * <0x3FFE>  Bootloader CRC                           <halfword>
-//! * <0x4000>  App image A start                        <code up to 0x1DFFC (~120K) bytes>
-//! * <0x21FFC> App image A CRC check length             <halfword>
-//! * <0x21FFE> App image A CRC check value              <halfword>
-//! * <0x22000> App image B start                        <code up to 0x1DFFC (~120K) bytes>
-//! * <0x3FFFC> App image B CRC check length             <halfword>
-//! * <0x3FFFE> App image B CRC check value              <halfword>
+//! * <0x0>     Bootloader start                         <code up to 0x3FFC bytes>
+//! * <0x3FFC>  Bootloader CRC                           <word>
+//! * <0x4000>  App image A start                        <code up to 0x1DFF8 (~120K) bytes>
+//! * <0x21FF8> App image A CRC check length             <word>
+//! * <0x21FFC> App image A CRC check value              <word>
+//! * <0x22000> App image B start                        <code up to 0x1DFF8 (~120K) bytes>
+//! * <0x3FFF8> App image B CRC check length             <word>
+//! * <0x3FFFC> App image B CRC check value              <word>
 //! * <0x40000>                                          <end>
 #![no_main]
 #![no_std]
@@ -30,14 +30,9 @@ const MAX_TM_SIZE: usize = 128;
 const MAX_TM_FRAME_SIZE: usize = cobs::max_encoding_length(MAX_TM_SIZE);
 
 const UART_BAUDRATE: u32 = 115200;
-const BOOT_NVM_MEMORY_ID: u8 = 1;
 const RX_DEBUGGING: bool = false;
 const TX_DEBUGGING: bool = false;
 
-pub enum ActionId {
-    CorruptImageA = 128,
-    CorruptImageB = 129,
-}
 pub trait WdtInterface {
     fn feed(&self);
 }
@@ -85,34 +80,25 @@ pub struct DataConsumer<const BUF_SIZE: usize, const SIZES_LEN: usize> {
 
 static CLOCKS: OnceCell<Clocks> = OnceCell::new();
 
-pub const APP_A_START_ADDR: u32 = 0x4000;
-pub const APP_A_END_ADDR: u32 = 0x22000;
-pub const APP_B_START_ADDR: u32 = 0x22000;
-pub const APP_B_END_ADDR: u32 = 0x40000;
-
 #[rtic::app(device = pac, dispatchers = [U1, U2, U3])]
 mod app {
     use super::*;
-    use arbitrary_int::traits::Integer as _;
-    use arbitrary_int::{u11, u14};
     use cortex_m::asm;
+    use embassy_time::Timer;
     use embedded_io::Write;
-    use rtic_monotonics::{fugit::ExtU32, Monotonic};
     // Import panic provider.
     use panic_probe as _;
     // Import logger.
     use defmt_rtt as _;
+    use flashloader_types::{create_tm_packet, va416xx::Request, AppSel, Response};
     use rtic::Mutex;
-    use satrs::pus::verification::VerificationReportCreator;
-    use satrs::spacepackets::ecss::PusServiceId;
-    use satrs::spacepackets::ecss::{
-        tc::PusTcReader, tm::PusTmCreator, EcssEnumU8, PusPacket, WritablePusPacket,
-    };
+    use spacepackets::{CcsdsPacketReader, SpacePacketHeader};
     use va416xx_hal::clock::ClockConfigurator;
     use va416xx_hal::irq_router::enable_and_init_irq_router;
     use va416xx_hal::uart::InterruptContextTimeoutOrMaxSize;
     use va416xx_hal::{
         edac,
+        gpio::{Output, PinState},
         nvm::Nvm,
         pac,
         pins::PinsG,
@@ -141,7 +127,7 @@ mod app {
         tc_cons: DataConsumer<BUF_RB_SIZE_TC, SIZES_RB_SIZE_TC>,
         // We produce all TC in one task.
         tc_prod: DataProducer<BUF_RB_SIZE_TC, SIZES_RB_SIZE_TC>,
-        verif_reporter: VerificationReportCreator,
+        led: Output,
     }
 
     #[shared]
@@ -149,8 +135,6 @@ mod app {
         // Having this shared allows multiple tasks to generate telemetry.
         tm_prod: DataProducer<BUF_RB_SIZE_TM, SIZES_RB_SIZE_TM>,
     }
-
-    rtic_monotonics::systick_monotonic!(Mono, 10_000);
 
     #[init]
     fn init(mut cx: init::Context) -> (Shared, Local) {
@@ -177,8 +161,7 @@ mod app {
 
         let uart0 = Uart::new_for_uart0(cx.device.uart0, gpiog.pg0, gpiog.pg1, uart_config);
         let (tx, rx) = uart0.split();
-
-        let verif_reporter = VerificationReportCreator::new(u11::new(0));
+        let led = Output::new(gpiog.pg5, PinState::Low);
 
         let (buf_prod_tm, buf_cons_tm) = BUF_RB_TM
             .init(StaticRb::<u8, BUF_RB_SIZE_TM>::default())
@@ -194,15 +177,16 @@ mod app {
             .init(StaticRb::<usize, SIZES_RB_SIZE_TC>::default())
             .split_ref();
 
-        Mono::start(cx.core.SYST, clocks.sysclk().to_raw());
+        va416xx_hal::embassy_time::init(cx.device.tim15, cx.device.tim14, &clocks);
         CLOCKS.set(clocks).unwrap();
 
         let mut rx = rx.into_rx_with_interrupt();
         let mut rx_context = InterruptContextTimeoutOrMaxSize::new(MAX_TC_FRAME_SIZE);
         rx.read_fixed_len_or_timeout_based_using_irq(&mut rx_context)
             .expect("initiating UART RX failed");
-        pus_tc_handler::spawn().unwrap();
-        pus_tm_tx_handler::spawn().unwrap();
+        tc_handler::spawn().unwrap();
+        tm_tx_handler::spawn().unwrap();
+        blinky::spawn().unwrap();
         (
             Shared {
                 tm_prod: DataProducer {
@@ -227,7 +211,7 @@ mod app {
                     buf_prod: buf_prod_tc,
                     sizes_prod: sizes_prod_tc,
                 },
-                verif_reporter,
+                led,
             },
         )
     }
@@ -313,21 +297,19 @@ mod app {
         priority = 2,
         local=[
             tc_buf: [u8; MAX_TC_SIZE] = [0; MAX_TC_SIZE],
-            src_data_buf: [u8; 16] = [0; 16],
-            verif_buf: [u8; 32] = [0; 32],
+            tm_buf: [u8; MAX_TM_SIZE] = [0; MAX_TM_SIZE],
             tc_cons,
             rom_spi,
-            verif_reporter
         ],
         shared=[tm_prod]
     )]
-    async fn pus_tc_handler(mut cx: pus_tc_handler::Context) {
+    async fn tc_handler(mut cx: tc_handler::Context) {
         loop {
             // Try to read a TC from the ring buffer.
             let packet_len = cx.local.tc_cons.sizes_cons.try_pop();
             if packet_len.is_none() {
                 // Small delay, TCs might arrive very quickly.
-                Mono::delay(20.millis()).await;
+                Timer::after_millis(20).await;
                 continue;
             }
             let packet_len = packet_len.unwrap();
@@ -339,138 +321,67 @@ mod app {
                     .pop_slice(&mut cx.local.tc_buf[0..packet_len]),
                 packet_len
             );
-            // Read a telecommand, now handle it.
-            handle_valid_pus_tc(&mut cx);
+            handle_tc(&mut cx, packet_len);
         }
     }
 
-    fn handle_valid_pus_tc(cx: &mut pus_tc_handler::Context) {
-        let pus_tc = PusTcReader::new(cx.local.tc_buf);
-        if let Err(e) = pus_tc {
-            defmt::warn!("PUS TC error: {}", e);
-            return;
-        }
-        let pus_tc = pus_tc.unwrap();
-        let mut write_and_send = |tm: &PusTmCreator| {
-            let written_size = tm.write_to_bytes(cx.local.verif_buf).unwrap();
-            cx.shared.tm_prod.lock(|prod| {
-                prod.sizes_prod.try_push(tm.len_written()).unwrap();
-                prod.buf_prod
-                    .push_slice(&cx.local.verif_buf[0..written_size]);
-            });
+    fn handle_tc(cx: &mut tc_handler::Context, packet_len: usize) {
+        let packet = match CcsdsPacketReader::new_with_checksum(&cx.local.tc_buf[0..packet_len]) {
+            Ok(packet) => packet,
+            Err(e) => {
+                defmt::warn!("CCSDS packet error: {}", e);
+                return;
+            }
         };
-        let request_id = cx.local.verif_reporter.read_request_id(&pus_tc);
-        let tm = cx
-            .local
-            .verif_reporter
-            .acceptance_success(cx.local.src_data_buf, &request_id, u14::ZERO, 0, &[])
-            .expect("acceptance success failed");
-        write_and_send(&tm);
-
-        let tm = cx
-            .local
-            .verif_reporter
-            .start_success(cx.local.src_data_buf, &request_id, u14::ZERO, 0, &[])
-            .expect("acceptance success failed");
-        write_and_send(&tm);
-
-        if pus_tc.service_type_id() == PusServiceId::Action as u8 {
-            let mut corrupt_image = |base_addr: u32| {
-                // Safety: We only use this for NVM handling and we only do NVM
-                // handling here.
-                let nvm = Nvm::new(
-                    cx.local.rom_spi.take().unwrap(),
-                    CLOCKS.get().as_ref().unwrap(),
-                );
+        let (request, remainder) = match postcard::take_from_bytes::<Request>(packet.user_data()) {
+            Ok(result) => result,
+            Err(e) => {
+                defmt::warn!("failed to parse request: {}", e);
+                return;
+            }
+        };
+        let rom_spi = cx.local.rom_spi.take().unwrap();
+        let nvm = Nvm::new(rom_spi, CLOCKS.get().unwrap());
+        match request {
+            Request::Ping => defmt::info!("received ping TC"),
+            Request::Corrupt(app_sel) => {
+                defmt::info!("corrupting App Image {}", app_sel);
+                let base_addr = match app_sel {
+                    AppSel::A => flashloader_types::va416xx::APP_A_START_ADDR,
+                    AppSel::B => flashloader_types::va416xx::APP_B_START_ADDR,
+                };
                 let mut buf = [0u8; 4];
                 nvm.read_data(base_addr + 32, &mut buf);
-                buf[0] += 1;
+                buf[0] = buf[0].wrapping_add(1);
                 nvm.write_data(base_addr + 32, &buf);
-                *cx.local.rom_spi = Some(nvm.release());
-                let tm = cx
-                    .local
-                    .verif_reporter
-                    .completion_success(cx.local.src_data_buf, &request_id, u14::ZERO, 0, &[])
-                    .expect("completion success failed");
-                write_and_send(&tm);
-            };
-            if pus_tc.message_subtype_id() == ActionId::CorruptImageA as u8 {
-                defmt::info!("corrupting App Image A");
-                corrupt_image(APP_A_START_ADDR);
             }
-            if pus_tc.message_subtype_id() == ActionId::CorruptImageB as u8 {
-                defmt::info!("corrupting App Image B");
-                corrupt_image(APP_B_START_ADDR);
-            }
-        }
-        if pus_tc.service_type_id() == PusServiceId::Test as u8 && pus_tc.message_subtype_id() == 1
-        {
-            defmt::info!("received ping TC");
-            let tm = cx
-                .local
-                .verif_reporter
-                .completion_success(cx.local.src_data_buf, &request_id, u14::ZERO, 0, &[])
-                .expect("completion success failed");
-            write_and_send(&tm);
-        } else if pus_tc.service_type_id() == PusServiceId::MemoryManagement as u8 {
-            let tm = cx
-                .local
-                .verif_reporter
-                .step_success(
-                    cx.local.src_data_buf,
-                    &request_id,
-                    u14::ZERO,
-                    0,
-                    &[],
-                    EcssEnumU8::new(0),
-                )
-                .expect("step success failed");
-            write_and_send(&tm);
-            // Raw memory write TC
-            if pus_tc.message_subtype_id() == 2 {
-                let app_data = pus_tc.app_data();
-                if app_data.len() < 10 {
-                    defmt::warn!(
-                        "app data for raw memory write is too short: {}",
-                        app_data.len()
-                    );
-                    return;
-                }
-                let memory_id = app_data[0];
-                if memory_id != BOOT_NVM_MEMORY_ID {
-                    defmt::warn!("memory ID {} not supported", memory_id);
-                    // TODO: Error reporting
-                    return;
-                }
-                let offset = u32::from_be_bytes(app_data[2..6].try_into().unwrap());
-                let data_len = u32::from_be_bytes(app_data[6..10].try_into().unwrap());
-                if 10 + data_len as usize > app_data.len() {
-                    defmt::warn!(
-                        "invalid data length {} for raw mem write detected",
-                        data_len
-                    );
-                    // TODO: Error reporting
-                    return;
-                }
-                let data = &app_data[10..10 + data_len as usize];
-                defmt::info!("writing {} bytes at offset {} to NVM", data_len, offset);
-                // Safety: We only use this for NVM handling and we only do NVM
-                // handling here.
-                let nvm = Nvm::new(
-                    cx.local.rom_spi.take().unwrap(),
-                    CLOCKS.get().as_ref().unwrap(),
+            Request::WriteNvm { offset } => {
+                defmt::info!(
+                    "writing {} bytes at offset {:#x} to NVM",
+                    remainder.len(),
+                    offset
                 );
-                nvm.write_data(offset, data);
-                *cx.local.rom_spi = Some(nvm.release());
-                let tm = cx
-                    .local
-                    .verif_reporter
-                    .completion_success(cx.local.src_data_buf, &request_id, u14::ZERO, 0, &[])
-                    .expect("completion success failed");
-                write_and_send(&tm);
+                nvm.write_data(offset, remainder);
                 defmt::info!("NVM operation done");
             }
         }
+        *cx.local.rom_spi = Some(nvm.release());
+
+        let tm_len = create_tm_packet(
+            cx.local.tm_buf,
+            SpacePacketHeader::new_from_apid(flashloader_types::APID),
+            Response::Ok,
+        )
+        .expect("creating TM packet failed");
+        let tm = &cx.local.tm_buf[0..tm_len];
+        cx.shared.tm_prod.lock(|prod| {
+            if prod.sizes_prod.vacant_len() >= 1 && prod.buf_prod.vacant_len() >= tm_len {
+                prod.sizes_prod.try_push(tm_len).unwrap();
+                prod.buf_prod.push_slice(tm);
+            } else {
+                defmt::warn!("TM queue full");
+            }
+        });
     }
 
     #[task(
@@ -483,7 +394,7 @@ mod app {
         ],
         shared=[]
     )]
-    async fn pus_tm_tx_handler(cx: pus_tm_tx_handler::Context) {
+    async fn tm_tx_handler(cx: tm_tx_handler::Context) {
         loop {
             while cx.local.tm_cons.sizes_cons.occupied_len() > 0 {
                 let next_size = cx.local.tm_cons.sizes_cons.try_pop().unwrap();
@@ -504,9 +415,18 @@ mod app {
                     .uart_tx
                     .write_all(&cx.local.encoded_buf[0..send_size + 2])
                     .unwrap();
-                Mono::delay(2.millis()).await;
+                Timer::after_millis(2).await;
             }
-            Mono::delay(50.millis()).await;
+            Timer::after_millis(50).await;
+        }
+    }
+
+    /// Heartbeat, shows that the flashloader is still running.
+    #[task(priority = 1, local = [led])]
+    async fn blinky(cx: blinky::Context) {
+        loop {
+            cx.local.led.toggle();
+            Timer::after_millis(500).await;
         }
     }
 

@@ -35,7 +35,7 @@ mod app {
     use cortex_m::asm;
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embedded_io_async::Write as _;
-    use models::{create_encoded_tm_packet, Response};
+    use flashloader_types::{create_encoded_tm_packet, va108xx::Request, AppSel, Response};
     use spacepackets::{CcsdsPacketReader, SpacePacketHeader};
     use va108xx_hal::pins::PinsA;
     use va108xx_hal::spi::ClockConfig;
@@ -185,9 +185,8 @@ mod app {
                         let frame = result.unwrap();
                         match CcsdsPacketReader::new_with_checksum(&cobs_decoder.dest()[0..frame]) {
                             Ok(packet) => {
-                                let request = postcard::take_from_bytes::<models::Request>(
-                                    packet.user_data(),
-                                );
+                                let request =
+                                    postcard::take_from_bytes::<Request>(packet.user_data());
                                 if request.is_err() {
                                     defmt::warn!(
                                         "Failed to parse command: {}",
@@ -197,20 +196,20 @@ mod app {
                                 }
                                 let (request, remainder) = request.unwrap();
                                 let response = match request {
-                                    models::Request::Corrupt(slot) => {
+                                    Request::Corrupt(slot) => {
                                         match slot {
-                                            models::AppSel::A => {
+                                            AppSel::A => {
                                                 defmt::info!("corrupting App Image A");
                                                 corrupt_image(APP_A_START_ADDR, cx.local.nvm);
                                             }
-                                            models::AppSel::B => {
+                                            AppSel::B => {
                                                 defmt::info!("corrupting App Image B");
                                                 corrupt_image(APP_B_START_ADDR, cx.local.nvm);
                                             }
                                         }
                                         Response::Ok
                                     }
-                                    models::Request::WriteNvm { offset } => {
+                                    Request::WriteNvm { offset } => {
                                         defmt::info!(
                                             "writing {} bytes to NVM at offset 0x{:08x}",
                                             remainder.len(),
@@ -220,7 +219,7 @@ mod app {
                                         defmt::info!("write complete");
                                         Response::Ok
                                     }
-                                    models::Request::SetBootSlot(app_sel) => {
+                                    Request::SetBootSlot(app_sel) => {
                                         defmt::info!(
                                             "received boot selection command with app select: {:?}",
                                             app_sel
@@ -231,7 +230,7 @@ mod app {
                                         );
                                         Response::Ok
                                     }
-                                    models::Request::Ping => {
+                                    Request::Ping => {
                                         defmt::info!("received ping TC");
                                         Response::Ok
                                     }
@@ -239,7 +238,7 @@ mod app {
                                 match create_encoded_tm_packet(
                                     &mut tm_buf,
                                     &mut encoded_tm_buf,
-                                    SpacePacketHeader::new_from_apid(models::APID),
+                                    SpacePacketHeader::new_from_apid(flashloader_types::APID),
                                     response,
                                 ) {
                                     Ok(encoded_len) => {
