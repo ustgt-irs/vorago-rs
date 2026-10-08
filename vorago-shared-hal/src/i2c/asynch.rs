@@ -189,6 +189,28 @@ fn pump_or_drain_fifo(
     progress
 }
 
+/// Bytes of the group containing `op_idx` that are not yet moved to or from the FIFO.
+fn group_remaining(ops: &[Operation<'_>], op_idx: usize, progress: usize) -> usize {
+    let dir = op_direction(&ops[op_idx]);
+    let mut remaining = op_len(&ops[op_idx]) - progress;
+    let mut i = next_op(ops, op_idx + 1);
+    while let Some(idx) = i {
+        if op_direction(&ops[idx]) != dir {
+            break;
+        }
+        remaining += op_len(&ops[idx]);
+        i = next_op(ops, idx + 1);
+    }
+    remaining
+}
+
+/// Sets the RX trigger level for the bytes still to come. A level above them would never be
+/// reached, so the last chunk lowers it to exactly what remains.
+fn set_rx_trigger(regs: &mut regs::MmioRegisters<'static>, remaining: usize) {
+    let level = remaining.clamp(1, FIFO_DEPTH / 2);
+    regs.write_rx_fifo_trigger(regs::TriggerLevel::new(u5::new(level as u8)));
+}
+
 /// Programs the word count and direction for the group starting at `first`, fills the TX FIFO
 /// for a write group and issues the command. Returns the interrupts the group needs, and the
 /// operation index and progress where the pre-fill stopped.
@@ -196,6 +218,9 @@ fn pump_or_drain_fifo(
 /// The caller enables the interrupts after the command was issued. Enabling `idle` before
 /// that would let the still idle bus trigger the completion path of a group which has not
 /// started yet.
+///
+/// `idle` and `waiting` are only enabled once all bytes of the group are moved. On the VA108xx,
+/// an enabled `idle` also fires during a receive group, about once per byte.
 fn start_group(
     regs: &mut regs::MmioRegisters<'static>,
     ops: &mut [Operation<'_>],
@@ -235,6 +260,10 @@ fn start_group(
             }
         }
     }
+    let remaining = group_remaining(ops, op_idx, progress);
+    if receive {
+        set_rx_trigger(regs, remaining);
+    }
     regs.write_command(command.reg_value());
 
     let interrupts = regs::InterruptControl::builder()
@@ -246,13 +275,14 @@ fn start_group(
         .with_nack_addr(true)
         .with_nack_data(!receive)
         // FIFO drain and re-fill conditions.
-        .with_rx_ready(receive && len > FIFO_DEPTH)
-        .with_tx_ready(!receive && len > FIFO_DEPTH)
+        .with_rx_ready(receive)
+        .with_tx_ready(!receive && remaining > 0)
         // Done status. Groups followed by another one end in `waiting`, the last one in `idle`.
-        .with_idle(command == super::Command::StartWithStop)
-        .with_waiting(command == super::Command::Start)
-        // Users might be interested in getting informed about stall conditions.
-        .with_stalled(true)
+        .with_idle(remaining == 0 && command == super::Command::StartWithStop)
+        .with_waiting(remaining == 0 && command == super::Command::Start)
+        // Not needed by the driver. On the VA108xx it can fire about once per byte during a
+        // read, although neither FIFO condition from the reference manual applies.
+        .with_stalled(false)
         // Unused.
         .with_i2c_idle(false)
         .with_tx_empty(false)
@@ -328,8 +358,8 @@ impl I2c {
     ///
     /// Returns the live status observed on this call. The driver only treats clock timeouts,
     /// arbitration loss, NACKs and FIFO overflows as transfer errors. Other bits, like
-    /// `stalled`, are not currently surfaced as an [super::Error] variant: read them from the
-    /// returned value if you need to observe them.
+    /// `stalled`, are not surfaced as an [super::Error] variant and do not raise an interrupt of
+    /// their own. They are still in the returned value of each call.
     ///
     /// # Safety
     ///
@@ -407,6 +437,9 @@ impl I2c {
                     );
                     return status;
                 }
+                if dir == regs::Direction::Receive {
+                    set_rx_trigger(&mut regs, group_remaining(operations, op_index, progress));
+                }
                 break;
             }
             // Everything after here: progress is equal to operations length and we either have
@@ -420,12 +453,20 @@ impl I2c {
                 progress = 0;
                 continue;
             }
-            // When we reach this point, all bytes of the group are in the FIFO. `tx_ready` is a
-            // level interrupt which stays set while the FIFO is below its trigger level, so it has
-            // to be disabled until the group is done.
-            regs.modify_interrupt_enable(|val| val.with_tx_ready(false));
-            // More work to do, so exit.
+            // When we reach this point, all bytes of the group are moved. `tx_ready` and
+            // `rx_ready` are level interrupts, so they have to be disabled until the group is
+            // done. Only now the done status is enabled, see [start_group].
+            //
+            // Only enable it while the group is still running. On an already idle controller,
+            // even a short enable pends the next interrupt. That interrupt finds the transfer
+            // still armed and enables it again, so the task that disarms it never runs.
             if !group_done_condition {
+                regs.modify_interrupt_enable(|val| {
+                    val.with_tx_ready(false)
+                        .with_rx_ready(false)
+                        .with_idle(opt_next_group.is_none())
+                        .with_waiting(opt_next_group.is_some())
+                });
                 break;
             }
             // At this point, we have to finish the last operation or start the next one.
