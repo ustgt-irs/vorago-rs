@@ -268,41 +268,23 @@ fn boot_app(app_sel: AppSel, cp: &cortex_m::Peripherals) -> ! {
         cp.NVIC.icer[0].write(0xFFFFFFFF);
         cp.NVIC.icpr[0].write(0xFFFFFFFF);
     }
-    cortex_m::asm::dsb();
-    cortex_m::asm::isb();
+    let app_start = match app_sel {
+        AppSel::A => APP_A_START_ADDR,
+        AppSel::B => APP_B_START_ADDR,
+    };
+    // `bootload` only sets the stack pointer and jumps. Without this, the app could use
+    // the interrupt handlers of the bootloader.
+    //
+    // SAFETY: We care about the side-effect of this write.
     unsafe {
-        if app_sel == AppSel::A {
-            cp.SCB.vtor.write(APP_A_START_ADDR);
-        } else {
-            cp.SCB.vtor.write(APP_B_START_ADDR);
-        }
+        cp.SCB.vtor.write(app_start);
     }
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
-    vector_reset();
-}
-
-pub fn vector_reset() -> ! {
+    // SAFETY: The image passed the CRC check, or it is the fallback image A.
     unsafe {
-        // Set R0 to VTOR address (0xE000ED08)
-        let vtor_address: u32 = 0xE000ED08;
-
-        // Load VTOR
-        let vtor: u32 = *(vtor_address as *const u32);
-
-        // Load initial MSP value
-        let initial_msp: u32 = *(vtor as *const u32);
-
-        // Set SP value (assume MSP is selected)
-        core::arch::asm!("mov sp, {0}", in(reg) initial_msp);
-
-        // Load reset vector
-        let reset_vector: u32 = *((vtor + 4) as *const u32);
-
-        // Branch to reset handler
-        core::arch::asm!("bx {0}", in(reg) reset_vector);
+        cortex_m::asm::bootload(app_start as *const u32);
     }
-    unreachable!();
 }
 
 fn setup_edac(syscfg: &mut pac::Sysconfig) {
