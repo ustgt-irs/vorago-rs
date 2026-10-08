@@ -6,6 +6,7 @@
 # runner = "gdb -q -x openocd.gdb"
 # runner = "gdb-multiarch -q -x jlink.gdb"
 
+# runner = "probe-rs run --chip VA108xx --protocol jtag"
 runner = "probe-rs run --chip VA108xx_RAM --protocol jtag"
 # runner = ["probe-rs", "run", "--chip", "$CHIP", "--log-format", "{L} {s}"]
 
@@ -40,7 +41,6 @@ target = "thumbv6m-none-eabi"        # Cortex-M0 and Cortex-M0+
 re = "run --example"
 rb = "run --bin"
 rrb = "run --release --bin"
-ut = "test --target x86_64-unknown-linux-gnu"
 
 [env]
 DEFMT_LOG = "info"

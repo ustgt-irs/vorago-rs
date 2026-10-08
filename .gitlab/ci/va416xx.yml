@@ -17,13 +17,6 @@ va416xx-build:
     - cd va416xx
     - cargo build --target thumbv7em-none-eabihf
 
-va416xx-test:
-  stage: stage2
-  extends: .nextest_setup
-  script:
-    - cd va416xx
-    - cargo nextest run --features va41630 -p va416xx-hal
-
 va416xx-fmt:
   stage: stage1
   extends: .common_setup

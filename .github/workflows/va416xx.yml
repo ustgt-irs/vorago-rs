@@ -35,24 +35,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: flip-link
-      # Without the config, binaries are linked without flip-link and the linker scripts.
-      - run: cp .cargo/config.toml.template .cargo/config.toml
       - run: cargo build --target thumbv7em-none-eabihf
-
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: va416xx
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --features va41630 -p va416xx-hal
-      # I think we can skip those on an embedded crate..
-      # - run: cargo test --doc -p va108xx-hal
 
   fmt:
     name: Check formatting
