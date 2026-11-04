@@ -95,7 +95,7 @@ fn on_interrupt_read(
     spi: &mut super::regs::MmioRegisters<'static>,
     enabled_irqs: InterruptControl,
 ) {
-    // Safety: The gate was observed active, so the slice published with it is still valid.
+    // Safety: The transfer is active, so the slice published with it is still valid.
     let read_slice = unsafe { context.state.rx_slice() };
     let transfer_len = read_slice.len();
     let mut rx_progress = context.state.rx_progress.load(Ordering::Relaxed);
@@ -130,7 +130,7 @@ fn on_interrupt_write(
     spi: &mut super::regs::MmioRegisters<'static>,
     enabled_irqs: InterruptControl,
 ) {
-    // Safety: The gate was observed active, so the slice published with it is still valid.
+    // Safety: The transfer is active, so the slice published with it is still valid.
     let write_slice = unsafe { context.state.tx_slice() };
     let transfer_len = write_slice.len();
     let mut rx_progress = context.state.rx_progress.load(Ordering::Relaxed);
@@ -167,7 +167,7 @@ fn on_interrupt_transfer(
     spi: &mut super::regs::MmioRegisters<'static>,
     enabled_irqs: InterruptControl,
 ) {
-    // Safety: The gate was observed active, so the slices published with it are still valid.
+    // Safety: The transfer is active, so the slices published with it are still valid.
     let read_slice = unsafe { context.state.rx_slice() };
     let read_len = read_slice.len();
     let write_slice = unsafe { context.state.tx_slice() };
@@ -209,7 +209,7 @@ fn on_interrupt_transfer_in_place(
     spi: &mut super::regs::MmioRegisters<'static>,
     enabled_irqs: InterruptControl,
 ) {
-    // Safety: The gate was observed active, so the slice published with it is still valid.
+    // Safety: The transfer is active, so the slice published with it is still valid.
     let transfer_slice = unsafe { context.state.rx_slice() };
     let transfer_len = transfer_slice.len();
     let mut rx_progress = context.state.rx_progress.load(Ordering::Relaxed);
@@ -272,8 +272,8 @@ fn isr_finish_handler(
         finish_transfer(spi, context);
         return;
     }
-    // Write back the updated counters. The gate stays open, so the ISR keeps servicing this
-    // transfer on the following interrupts.
+    // Write back the updated counters. The transfer stays active, so the ISR keeps servicing it
+    // on the following interrupts.
     context
         .state
         .tx_progress
@@ -380,33 +380,34 @@ impl TransferContext {
         }
     }
 
-    /// Arms the gate. Must be called after all other fields were stored.
+    /// Marks the transfer as active. Must be called after all other fields were stored.
     #[inline]
-    fn arm(&self, transfer_type: TransferType) {
+    fn set_active(&self, transfer_type: TransferType) {
         self.transfer_type
             .store(transfer_type as u8, Ordering::Release);
     }
 
-    /// Disarms the gate, so a spurious interrupt can never observe the stale buffer pointers.
+    /// Clears the active transfer, so a spurious interrupt can never observe the stale buffer
+    /// pointers.
     #[inline]
-    fn disarm(&self) {
+    fn clear_active(&self) {
         self.transfer_type
             .store(TransferType::NONE, Ordering::Release);
     }
 
-    /// Reads the gate. All other fields may only be read if this returns [Some].
+    /// Returns the active transfer type. All other fields may only be read if this returns [Some].
     #[inline]
     fn active_transfer_type(&self) -> Option<TransferType> {
         TransferType::from_raw(self.transfer_type.load(Ordering::Acquire))
     }
 
-    /// Closes the gate and restores the initial state, so the slot can be reused.
+    /// Clears the active transfer and restores the initial state, so the slot can be reused.
     #[inline]
     fn reset(&self) {
         // Must come first in program order: a live interrupt (e.g. during Drop's
         // cancellation path) must never see the fields below cleared while still
-        // observing an armed transfer.
-        self.disarm();
+        // observing an active transfer.
+        self.clear_active();
         self.state.reset();
         self.rx_overrun.store(false, Ordering::Relaxed);
     }
@@ -593,8 +594,8 @@ impl Spi {
         self.set_triggers(write_index, len);
 
         let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        // Publish the guarded fields before marking the transfer active, see [TransferContext].
+        // Safety: The guard borrows `words` and clears the active transfer on drop.
         unsafe { context.state.set_rx_slice(words) };
         context.state.clear_tx_slice();
         context
@@ -603,7 +604,7 @@ impl Spi {
             .store(write_index, Ordering::Relaxed);
         context.state.rx_progress.store(0, Ordering::Relaxed);
         context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Read);
+        context.set_active(TransferType::Read);
 
         self.release_tx_pause(len > FIFO_DEPTH)
     }
@@ -611,8 +612,8 @@ impl Spi {
     fn start_write<'spi, 'buf>(&'spi mut self, words: &'buf [u8]) -> TransferGuard<'spi, 'buf> {
         let write_index = self.init_transfer_and_prefill(words);
         let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        // Publish the guarded fields before marking the transfer active, see [TransferContext].
+        // Safety: The guard borrows `words` and clears the active transfer on drop.
         unsafe { context.state.set_tx_slice(words) };
         context.state.clear_rx_slice();
         context
@@ -621,7 +622,7 @@ impl Spi {
             .store(write_index, Ordering::Relaxed);
         context.state.rx_progress.store(0, Ordering::Relaxed);
         context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Write);
+        context.set_active(TransferType::Write);
 
         self.release_tx_pause(words.len() > FIFO_DEPTH)
     }
@@ -646,8 +647,8 @@ impl Spi {
         self.set_triggers(fifo_prefill, full_write_len);
 
         let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The guard borrows both buffers for its lifetime and closes the gate on drop.
+        // Publish the guarded fields before marking the transfer active, see [TransferContext].
+        // Safety: The guard borrows both buffers and clears the active transfer on drop.
         unsafe {
             context.state.set_tx_slice(write);
             context.state.set_rx_slice(read);
@@ -658,7 +659,7 @@ impl Spi {
             .store(fifo_prefill, Ordering::Relaxed);
         context.state.rx_progress.store(0, Ordering::Relaxed);
         context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Transfer);
+        context.set_active(TransferType::Transfer);
 
         self.release_tx_pause(fifo_prefill > FIFO_DEPTH)
     }
@@ -670,8 +671,8 @@ impl Spi {
         let write_idx = self.init_transfer_and_prefill(words);
         let len = words.len();
         let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        // Publish the guarded fields before marking the transfer active, see [TransferContext].
+        // Safety: The guard borrows `words` and clears the active transfer on drop.
         unsafe { context.state.set_rx_slice(words) };
         context.state.clear_tx_slice();
         context
@@ -680,7 +681,7 @@ impl Spi {
             .store(write_idx, Ordering::Relaxed);
         context.state.rx_progress.store(0, Ordering::Relaxed);
         context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::TransferInPlace);
+        context.set_active(TransferType::TransferInPlace);
 
         self.release_tx_pause(len > FIFO_DEPTH)
     }
@@ -732,7 +733,7 @@ impl Spi {
         }
     }
 
-    /// Enables the interrupts and starts the frame. Must be called after the gate was armed.
+    /// Enables the interrupts and starts the frame. Call after marking the transfer active.
     fn release_tx_pause<'spi, 'buf>(
         &'spi mut self,
         enable_tx_irq: bool,

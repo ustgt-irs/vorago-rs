@@ -8,8 +8,8 @@ use portable_atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 /// Plain atomics rather than a `critical_section::Mutex<RefCell<_>>` so it can live in a
 /// `static` array directly and the interrupt handler does not need a critical section.
 ///
-/// This does not include the transfer-type gate itself: the driver keeps that as its own
-/// `AtomicU8` field alongside a `TransferState`.
+/// This does not include the active transfer flag. The driver keeps that as its own `AtomicU8`
+/// field alongside a `TransferState`.
 pub(crate) struct TransferState {
     /// Progress counter for the TX side of the transfer, in words.
     pub(crate) tx_progress: AtomicUsize,
@@ -130,9 +130,9 @@ impl TransferState {
 
     /// Clears progress counters and buffer slices, so the slot can be reused.
     ///
-    /// Does not touch the transfer-type gate: callers must disarm that themselves, before
-    /// calling this, so a live interrupt can never see these fields cleared while still
-    /// observing an armed transfer.
+    /// Does not clear the active transfer. Callers must do that themselves before calling this,
+    /// so a live interrupt can never see these fields cleared while still observing an active
+    /// transfer.
     #[inline]
     pub(crate) fn reset(&self) {
         self.tx_progress.store(0, Ordering::Relaxed);

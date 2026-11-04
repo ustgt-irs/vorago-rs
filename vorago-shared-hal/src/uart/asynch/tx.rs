@@ -65,7 +65,7 @@ fn on_interrupt(bank: Bank) {
 
     let slice_len = context.transfer_len.load(Ordering::Relaxed);
     let mut progress = context.progress.load(Ordering::Relaxed);
-    // Safety: The gate was observed active, so the slice published with it is still valid.
+    // Safety: The transfer is active, so the slice published with it is still valid.
     let slice = unsafe { core::slice::from_raw_parts(raw_data_ptr as *const u8, slice_len) };
 
     if progress >= slice_len && interrupt_status.tx_empty() {
@@ -173,17 +173,18 @@ impl Tx {
         }
 
         let context = &TX_CONTEXTS[idx];
-        // Publish the guarded fields before opening the gate (`raw_data`) with `Release`, so a
-        // reader that observes `raw_data` non-null via the `Acquire` load in `on_interrupt` is
-        // guaranteed to see these too, rather than stale values from a previous transfer.
+        // Publish the guarded fields before marking the transfer active (`raw_data`) with
+        // `Release`, so a reader that observes `raw_data` non-null via the `Acquire` load in
+        // `on_interrupt` is guaranteed to see these too, rather than stale values from a previous
+        // transfer.
         context.transfer_len.store(buf.len(), Ordering::Relaxed);
         context.progress.store(init_fill_count, Ordering::Relaxed);
         context
             .raw_data
             .store(buf.as_ptr().cast_mut(), Ordering::Release);
 
-        // Ensure those are enabled together. Doing this before the gate is armed can lead to
-        // weird glitches otherwise.
+        // Ensure those are enabled together. Doing this before the transfer is marked active can
+        // lead to weird glitches otherwise.
         self.0.enable_interrupts(
             buf.len() > FIFO_DEPTH,
             #[cfg(feature = "vor4x")]
@@ -232,7 +233,7 @@ fn poll_transfer_done(bank: Bank, cx: &mut core::task::Context<'_>) -> core::tas
     core::task::Poll::Ready(context.progress.load(Ordering::Relaxed))
 }
 
-/// Stops the transfer and closes the gate on completion and on cancellation.
+/// Stops the transfer and marks it inactive on completion and on cancellation.
 struct TransferGuard<'tx, 'buf>(&'tx mut Tx, PhantomData<&'buf [u8]>);
 
 impl Drop for TransferGuard<'_, '_> {
