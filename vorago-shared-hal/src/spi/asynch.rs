@@ -557,9 +557,9 @@ impl Spi {
     /// incoming words after `read` has been filled will be discarded. If `write` is shorter,
     /// the value of words sent in MOSI after all `write` has been sent is 0.
     ///
-    /// Returns immediately if either of the provided buffers is empty.
+    /// Returns immediately if both provided buffers are empty.
     pub async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), RxOverrunError> {
-        if read.is_empty() || write.is_empty() {
+        if read.is_empty() && write.is_empty() {
             return Ok(());
         }
         let bank = self.bank_id();
@@ -660,7 +660,7 @@ impl Spi {
         context.rx_overrun.store(false, Ordering::Relaxed);
         context.arm(TransferType::Transfer);
 
-        self.release_tx_pause(fifo_prefill > FIFO_DEPTH)
+        self.release_tx_pause(full_write_len > FIFO_DEPTH)
     }
 
     fn start_transfer_in_place<'spi, 'buf>(

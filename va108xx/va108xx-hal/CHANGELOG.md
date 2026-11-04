@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   async driver disabled blockmode and never set the BMSTART_BMSTOP bit, so CS stayed asserted.
 - Cancelling an async SPI transfer now ends the blockmode frame. Dropping a transfer future only
   cleared the FIFOs, which leaves the frame open and the chip select asserted.
+- Async SPI `transfer` now runs when only one of the buffers is empty, as documented. It
+  returned immediately before.
 
 ## [v0.14.0] 2026-07-14
 

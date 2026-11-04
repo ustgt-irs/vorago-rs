@@ -108,6 +108,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   async driver disabled blockmode and never set the BMSTART_BMSTOP bit, so CS stayed asserted.
 - Cancelling an async SPI transfer now ends the blockmode frame. Dropping a transfer future only
   cleared the FIFOs, which leaves the frame open and the chip select asserted.
+- Async SPI `transfer` now runs when only one of the buffers is empty, as documented. It
+  returned immediately before.
 - Fixed the I2C blocking module to properly implement the embedded HAL I2C trait contract.
 - I2C empty reads are skipped
 - An I2C clock timeout now cancels the transfer and clears the FIFO
