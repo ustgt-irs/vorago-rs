@@ -36,7 +36,6 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   of requiring access to the driver instance, so it can be called from an interrupt handler that
   only has a token, not the driver.
 - Added `Spi::into_async` on the blocking driver as a shortcut for `asynch::Spi::new`.
-- `SpiFuture` was renamed to `asynch::Transfer`. The old name is kept as a deprecated type alias.
 - `SpiConfig` was renamed to `Config` and reworked: it is now `#[non_exhaustive]` with public
   fields (`clock`, `mode`, `blockmode`, ...) instead of a builder-method API, plus a
   `Config::new(mode, clock)` constructor for the two fields without a sensible default.
@@ -65,6 +64,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   called.
 - Removed `TxOverrunError`. It was never returned. `asynch::Tx::write_all` and `flush` now return
   `()`, and the `embedded_io` error type of `asynch::Tx` is `core::convert::Infallible`.
+- The async SPI `read`, `write`, `transfer` and `transfer_in_place` methods are now `async fn`s.
+  The `asynch::Transfer` future type and the deprecated `SpiFuture` alias were removed. The
+  transfer now starts on the first poll of the future, not when the method is called.
 - Added `core::fmt::Write` for the blocking `uart::Tx`, so `write!`/`writeln!` work directly on
   it.
 - `RxAsync` and `RxAsyncOverwriting` were removed, along with the `heapless` dependency they

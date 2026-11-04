@@ -54,6 +54,12 @@ impl TransferState {
         self.waker.wake();
     }
 
+    /// Reads the completion flag without consuming it.
+    #[inline]
+    pub(crate) fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
     /// Registers the waker and consumes the completion flag.
     ///
     /// `Acquire` pairs with the `Release` store in `signal_done`.
