@@ -1,4 +1,4 @@
-use core::{cell::Cell, marker::PhantomData};
+use core::marker::PhantomData;
 
 use crate::i2c::{
     Address, FIFO_DEPTH, check_group_lengths, next_group, next_op, op_direction, op_len, regs,
@@ -109,6 +109,11 @@ impl TransferContext {
             return None;
         }
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, self.ops_len.load(Ordering::Relaxed)) })
+    }
+
+    #[inline]
+    fn is_active(&self) -> bool {
+        !self.ops_slice_ptr.load(Ordering::Acquire).is_null()
     }
 
     /// Clears the active transfer, so a spurious interrupt can never observe the stale operations.
@@ -272,7 +277,65 @@ fn abort(
     // Ends the transaction on the bus. Necessary because groups started with a plain `Start`
     // do not self-terminate the way `StartWithStop` does.
     regs.write_command(super::Command::Cancel.reg_value());
+    context.clear_active();
     context.signal_done();
+}
+
+/// Returns the transfer result once the interrupt handler signals completion.
+fn poll_transfer_done(
+    bank: super::Bank,
+    cx: &mut core::task::Context<'_>,
+) -> core::task::Poll<Result<(), super::Error>> {
+    let context = &TRANSFER_CONTEXTS[bank as usize];
+    if !context.poll_done(cx.waker()) {
+        return core::task::Poll::Pending;
+    }
+    // Read the error before resetting: `reset` clears it too.
+    let error = context.take_error();
+    context.reset();
+    let Some(error) = error else {
+        return core::task::Poll::Ready(Ok(()));
+    };
+    let transfer_error = match error {
+        TransferErrorKind::None => return core::task::Poll::Ready(Ok(())),
+        TransferErrorKind::ArbitrationLost => super::Error::ArbitrationLost,
+        TransferErrorKind::NackAddr => super::Error::NackAddr,
+        TransferErrorKind::NackData => super::Error::NackData,
+        TransferErrorKind::ClockTimeout => {
+            // Safety: Only reads a register which the interrupt handler does not write.
+            let regs = unsafe { bank.steal_regs() };
+            super::Error::ClockTimeout(regs.read_clk_timeout_limit().value())
+        }
+        TransferErrorKind::Overflow => super::Error::Overflow,
+        TransferErrorKind::InsufficientDataReceived => super::Error::InsufficientDataReceived,
+    };
+    core::task::Poll::Ready(Err(transfer_error))
+}
+
+/// Stops an in-flight transfer on drop. The interrupt handler accesses the operations until then.
+struct TransferGuard<'i2c, 'ops>(&'i2c mut I2c, PhantomData<&'ops mut ()>);
+
+impl Drop for TransferGuard<'_, '_> {
+    fn drop(&mut self) {
+        let context = &TRANSFER_CONTEXTS[self.0.0.id() as usize];
+        // The interrupt handler clears the active transfer once it finished or aborted it.
+        let in_flight = context.is_active();
+        // Always reset: a future dropped after completion but before its next poll would
+        // otherwise leave the done flag set for the next transaction.
+        // Clearing the active transfer also has to happen before disabling the interrupts. An
+        // interrupt already pending in the NVIC would otherwise still see the active transfer,
+        // start the next group and re-enable the interrupts.
+        context.reset();
+        if !in_flight {
+            return;
+        }
+        let i2c = &mut self.0.0;
+        i2c.disable_interrupts();
+        i2c.regs.write_interrupt_clear(regs::InterruptClear::ALL);
+        i2c.cancel_transfer();
+        i2c.clear_tx_fifo();
+        i2c.clear_rx_fifo();
+    }
 }
 
 /// Async I2C driver, built on top of the blocking [I2cMaster](super::I2cMaster).
@@ -285,8 +348,9 @@ impl I2c {
     ///
     /// The user MUST ensure that the `Drop` method of all futures generated with this driver
     /// is called on transfer cancellation. By default, this does not require any special
-    /// handling. This case was considered exotic enough to justify not making the function
-    /// `unsafe`.
+    /// handling. Do *NOT* use `core::mem::forget` on a started future. The interrupt handler
+    /// would keep accessing the operations after they are gone.
+    /// This case was considered exotic enough to justify not making the function `unsafe`.
     pub fn new(
         mut i2c: super::I2cMaster,
         #[cfg(feature = "vor1x")] opt_irq_cfg: Option<InterruptConfig>,
@@ -437,6 +501,7 @@ impl I2c {
                 }
                 None => {
                     regs.write_interrupt_enable(regs::InterruptControl::ZERO);
+                    context.clear_active();
                     context.signal_done();
                 }
             }
@@ -450,24 +515,39 @@ impl I2c {
         status
     }
 
-    /// Start an async transaction, returning a future which completes once all operations
-    /// were performed.
+    /// Async transaction which completes once all operations were performed.
+    ///
+    /// The transfer starts on the first poll of the returned future, not when this method is
+    /// called.
     ///
     /// Consecutive operations of the same direction are merged into one hardware transfer.
     /// Empty reads are skipped. Empty writes address the target without data, which can be used
     /// to probe for a device.
-    pub fn transaction<'ops>(
+    pub async fn transaction(
         &mut self,
         address: u8,
-        operations: &'ops mut [Operation<'_>],
-    ) -> Result<Transfer<'_, 'ops>, super::Error> {
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), super::Error> {
         check_group_lengths(operations)?;
-        let context = &TRANSFER_CONTEXTS[self.0.id as usize];
         let Some(first) = next_op(operations, 0) else {
-            context.signal_done();
-            return Ok(Transfer::new(self));
+            return Ok(());
         };
+        let bank = self.0.id;
+        let _guard = self.start_transaction(address, operations, first);
+        core::future::poll_fn(|cx| poll_transfer_done(bank, cx)).await
+    }
+
+    fn start_transaction<'i2c, 'ops>(
+        &'i2c mut self,
+        address: u8,
+        operations: &'ops mut [Operation<'_>],
+        first: usize,
+    ) -> TransferGuard<'i2c, 'ops> {
+        let context = &TRANSFER_CONTEXTS[self.0.id as usize];
         self.0.disable_interrupts();
+        // The guard resets the context too. Doing it here as well keeps a transaction safe from
+        // any state a previous one left behind.
+        context.reset();
         self.0.regs.write_interrupt_clear(regs::InterruptClear::ALL);
         self.0.clear_tx_fifo();
         self.0.clear_rx_fifo();
@@ -477,12 +557,11 @@ impl I2c {
             op_direction(&operations[first]),
         );
         let (interrupts, op_index, progress) = start_group(&mut self.0.regs, operations, first);
-        // Safety: The returned transfer borrows `operations` until it completes or is dropped.
-        // Users are not allowed to forget transfers, see the safety note on [Self::new].
+        // Safety: The guard borrows `operations` and clears the active transfer on drop.
+        // Users are not allowed to forget the future, see the safety note on [Self::new].
         unsafe { context.set_active(operations, op_index, progress) };
         self.0.regs.write_interrupt_enable(interrupts);
-
-        Ok(Transfer::new(self))
+        TransferGuard(self, PhantomData)
     }
 }
 
@@ -517,83 +596,10 @@ impl embedded_hal_async::i2c::I2c for I2c {
         address: u8,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Self::Error> {
-        self.transaction(address, operations)?.await
+        self.transaction(address, operations).await
     }
 }
 
 impl embedded_hal_async::i2c::ErrorType for I2c {
     type Error = super::Error;
-}
-
-/// Live I2C transfer returned by [I2c::transaction].
-///
-/// Implements [Future] and can be polled/awaited to completion.
-pub struct Transfer<'d, 'ops> {
-    driver: &'d mut I2c,
-    finished_regularly: Cell<bool>,
-    /// The interrupt handler accesses the operations until the transfer completes or is dropped.
-    _operations: PhantomData<&'ops mut ()>,
-}
-
-impl<'d> Transfer<'d, '_> {
-    fn new(driver: &'d mut I2c) -> Self {
-        Self {
-            driver,
-            finished_regularly: Cell::new(false),
-            _operations: PhantomData,
-        }
-    }
-}
-
-impl core::future::Future for Transfer<'_, '_> {
-    type Output = Result<(), super::Error>;
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        let context = &TRANSFER_CONTEXTS[self.driver.0.id() as usize];
-        if !context.poll_done(cx.waker()) {
-            return core::task::Poll::Pending;
-        }
-        self.finished_regularly.set(true);
-        // Read the error before resetting: `reset` clears it too, so it must happen last.
-        let error = context.take_error();
-        context.reset();
-        let Some(error) = error else {
-            return core::task::Poll::Ready(Ok(()));
-        };
-        let transfer_error = match error {
-            TransferErrorKind::None => return core::task::Poll::Ready(Ok(())),
-            TransferErrorKind::ArbitrationLost => super::Error::ArbitrationLost,
-            TransferErrorKind::NackAddr => super::Error::NackAddr,
-            TransferErrorKind::NackData => super::Error::NackData,
-            TransferErrorKind::ClockTimeout => {
-                super::Error::ClockTimeout(self.driver.0.regs.read_clk_timeout_limit().value())
-            }
-            TransferErrorKind::Overflow => super::Error::Overflow,
-            TransferErrorKind::InsufficientDataReceived => super::Error::InsufficientDataReceived,
-        };
-        core::task::Poll::Ready(Err(transfer_error))
-    }
-}
-
-impl Drop for Transfer<'_, '_> {
-    fn drop(&mut self) {
-        if !self.finished_regularly.get() {
-            // Clear the active transfer before disabling the interrupts. An interrupt already
-            // pending in the NVIC would otherwise still see the active transfer, start the next
-            // group and re-enable the interrupts.
-            let context = &TRANSFER_CONTEXTS[self.driver.0.id() as usize];
-            context.reset();
-            self.driver.0.disable_interrupts();
-            self.driver
-                .0
-                .regs
-                .write_interrupt_clear(regs::InterruptClear::ALL);
-            self.driver.0.cancel_transfer();
-            self.driver.0.clear_tx_fifo();
-            self.driver.0.clear_rx_fifo();
-        }
-    }
 }

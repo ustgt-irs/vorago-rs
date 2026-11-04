@@ -176,7 +176,6 @@ async fn run_sequence_tests(i2c: &mut I2c, addr: u8) {
                 Operation::Write(&[INT1_THS, 0x11]),
             ],
         )
-        .expect("starting [W, R, W] failed")
         .await
         .expect("[W, R, W] failed");
         let irqs = take_irqs();
@@ -195,7 +194,6 @@ async fn run_sequence_tests(i2c: &mut I2c, addr: u8) {
                 Operation::Write(&[INT1_THS, 0x22]),
             ],
         )
-        .expect("starting [R, W] failed")
         .await
         .expect("[R, W] failed");
         let irqs = take_irqs();
@@ -208,7 +206,6 @@ async fn run_sequence_tests(i2c: &mut I2c, addr: u8) {
             addr,
             &mut [Operation::Write(&[INT1_THS]), Operation::Write(&[0x33])],
         )
-        .expect("starting [W, W] failed")
         .await
         .expect("[W, W] failed");
         let irqs = take_irqs();
@@ -228,7 +225,6 @@ async fn run_sequence_tests(i2c: &mut I2c, addr: u8) {
                 Operation::Read(&mut second),
             ],
         )
-        .expect("starting [W, R, R] failed")
         .await
         .expect("[W, R, R] failed");
         defmt::info!("[W, R, R] ok ({} irqs)", take_irqs());
