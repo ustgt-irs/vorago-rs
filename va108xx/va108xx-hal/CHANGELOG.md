@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   called.
 - Removed `TxOverrunError`. It was never returned. `asynch::Tx::write_all` and `flush` now return
   `()`, and the `embedded_io` error type of `asynch::Tx` is `core::convert::Infallible`.
+- The async SPI `read`, `write`, `transfer` and `transfer_in_place` methods are now `async fn`s.
+  The `asynch::Transfer` future type and the deprecated `SpiFuture` alias were removed. The
+  transfer now starts on the first poll of the future, not when the method is called.
 - Added `core::fmt::Write` for the blocking `uart::Tx`, so `write!`/`writeln!` work directly on
   it.
 - `RxAsync` and `RxAsyncOverwriting` were removed, along with the `heapless` dependency they

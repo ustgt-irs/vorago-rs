@@ -1,4 +1,4 @@
-use core::sync::atomic::Ordering;
+use core::{marker::PhantomData, sync::atomic::Ordering};
 
 use arbitrary_int::u5;
 use portable_atomic::{AtomicBool, AtomicU8};
@@ -61,7 +61,7 @@ fn on_interrupt(peripheral: super::Bank) {
         return;
     }
     let context = &TRANSFER_CONTEXTS[index];
-    // `Acquire` pairs with the `Release` store in the future constructors: observing an active
+    // `Acquire` pairs with the `Release` store in the `start_*` methods: observing an active
     // transfer type here guarantees the buffers and counters read below belong to that transfer.
     let Some(transfer_type) = context.active_transfer_type() else {
         // No transfer active.
@@ -328,7 +328,7 @@ fn reset_trigger_levels(spi: &mut super::regs::MmioRegisters<'static>) {
     spi.write_tx_fifo_trigger(TriggerLevel::new(u5::new(0x00)));
 }
 
-/// Kind of transfer an async [Transfer] is performing.
+/// Kind of transfer the async [Spi] driver is performing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
@@ -412,308 +412,48 @@ impl TransferContext {
     }
 }
 
-/// Live SPI transfer returned by the async transfer methods on [Spi].
-///
-/// Implements [Future] and can be polled/awaited to completion.
-pub struct Transfer<'spi, 'read, 'write> {
+/// Returns the transfer result once the interrupt handler signals completion.
+fn poll_transfer_done(
     bank: super::Bank,
-    spi: &'spi mut super::Spi<u8>,
-    empty_buffer: bool,
-    finished_regularly: core::cell::Cell<bool>,
-    phantom_read: core::marker::PhantomData<(&'read (), &'write ())>,
+    cx: &mut core::task::Context<'_>,
+) -> core::task::Poll<Result<(), RxOverrunError>> {
+    let context = &TRANSFER_CONTEXTS[bank as usize];
+    if !context.state.poll_done(cx.waker()) {
+        return core::task::Poll::Pending;
+    }
+    let rx_overrun = context.rx_overrun.load(Ordering::Relaxed);
+    // Clearing the active transfer tells the guard that the future saw the completion.
+    context.reset();
+    if rx_overrun {
+        return core::task::Poll::Ready(Err(RxOverrunError));
+    }
+    core::task::Poll::Ready(Ok(()))
 }
 
-/// Type alias for backwards compatibility
-#[deprecated(since = "0.5.0", note = "renamed to `SpiTransfer`")]
-pub type SpiFuture<'spi, 'read, 'write> = Transfer<'spi, 'read, 'write>;
+/// Stops an in-flight transfer on drop. The interrupt handler accesses the buffers until then.
+struct TransferGuard<'spi, 'buf>(&'spi mut Spi, PhantomData<&'buf [u8]>);
 
-impl<'spi, 'read, 'write> Transfer<'spi, 'read, 'write> {
-    fn new_for_read(
-        spi: &'spi mut super::Spi<u8>,
-        bank: super::Bank,
-        words: &'read mut [u8],
-    ) -> Self {
-        if words.is_empty() {
-            return Self {
-                bank,
-                spi,
-                empty_buffer: true,
-                finished_regularly: core::cell::Cell::new(false),
-                phantom_read: core::marker::PhantomData,
-            };
-        }
-        Self::generic_init_transfer(spi, bank);
-
-        let len = words.len();
-        let write_index = core::cmp::min(super::FIFO_DEPTH, len);
-        // Send dummy bytes.
-        (0..write_index).for_each(|idx| {
-            spi.regs.write_data(data_word(0, idx == len - 1));
-        });
-
-        Self::set_triggers(spi, write_index, len);
-
-        let context = &TRANSFER_CONTEXTS[bank as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The future borrows `words` for its lifetime and the `Drop` impl closes the gate.
-        unsafe { context.state.set_rx_slice(words) };
-        context.state.clear_tx_slice();
-        context
-            .state
-            .tx_progress
-            .store(write_index, Ordering::Relaxed);
-        context.state.rx_progress.store(0, Ordering::Relaxed);
-        context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Read);
-
-        spi.regs.write_interrupt_clear(InterruptClear::ALL);
-        spi.regs
-            .write_interrupt_control(InterruptControl::ENABLE_ALL.with_tx(len > FIFO_DEPTH));
-        spi.regs.modify_ctrl1(|v| v.with_mtxpause(false));
-        Self {
-            bank,
-            spi,
-            empty_buffer: false,
-            finished_regularly: core::cell::Cell::new(false),
-            phantom_read: core::marker::PhantomData,
-        }
-    }
-
-    fn new_for_write(
-        spi: &'spi mut super::Spi<u8>,
-        bank: super::Bank,
-        words: &'write [u8],
-    ) -> Self {
-        if words.is_empty() {
-            return Self {
-                bank,
-                spi,
-                empty_buffer: true,
-                finished_regularly: core::cell::Cell::new(false),
-                phantom_read: core::marker::PhantomData,
-            };
-        }
-        let index = bank as usize;
-        let write_index = Self::generic_init_transfer_write_transfer_in_place(spi, bank, words);
-        let context = &TRANSFER_CONTEXTS[index];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The future borrows `words` for its lifetime and the `Drop` impl closes the gate.
-        unsafe { context.state.set_tx_slice(words) };
-        context.state.clear_rx_slice();
-        context
-            .state
-            .tx_progress
-            .store(write_index, Ordering::Relaxed);
-        context.state.rx_progress.store(0, Ordering::Relaxed);
-        context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Write);
-
-        spi.regs.write_interrupt_clear(InterruptClear::ALL);
-        spi.regs.write_interrupt_control(
-            InterruptControl::ENABLE_ALL.with_tx(words.len() > FIFO_DEPTH),
-        );
-        spi.regs.modify_ctrl1(|v| v.with_mtxpause(false));
-        Self {
-            bank,
-            spi,
-            empty_buffer: false,
-            finished_regularly: core::cell::Cell::new(false),
-            phantom_read: core::marker::PhantomData,
-        }
-    }
-
-    fn new_for_transfer(
-        spi: &'spi mut super::Spi<u8>,
-        bank: super::Bank,
-        read: &'read mut [u8],
-        write: &'write [u8],
-    ) -> Self {
-        if read.is_empty() || write.is_empty() {
-            return Self {
-                bank,
-                spi,
-                empty_buffer: true,
-                finished_regularly: core::cell::Cell::new(false),
-                phantom_read: core::marker::PhantomData,
-            };
-        }
-        let index = bank as usize;
-        let full_write_len = core::cmp::max(read.len(), write.len());
-        let fifo_prefill = core::cmp::min(super::FIFO_DEPTH, full_write_len);
-
-        Self::generic_init_transfer(spi, bank);
-
-        for write_index in 0..fifo_prefill {
-            let value = write.get(write_index).copied().unwrap_or(0);
-            spi.regs
-                .write_data(data_word(value as u32, write_index == full_write_len - 1));
-        }
-
-        Self::set_triggers(spi, fifo_prefill, full_write_len);
-
-        let context = &TRANSFER_CONTEXTS[index];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The future borrows both buffers for its lifetime and the `Drop` impl closes
-        // the gate.
-        unsafe {
-            context.state.set_tx_slice(write);
-            context.state.set_rx_slice(read);
-        }
-        context
-            .state
-            .tx_progress
-            .store(fifo_prefill, Ordering::Relaxed);
-        context.state.rx_progress.store(0, Ordering::Relaxed);
-        context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::Transfer);
-
-        spi.regs.write_interrupt_clear(InterruptClear::ALL);
-        spi.regs.write_interrupt_control(
-            InterruptControl::ENABLE_ALL.with_tx(fifo_prefill > FIFO_DEPTH),
-        );
-        spi.regs.modify_ctrl1(|v| v.with_mtxpause(false));
-        Self {
-            bank,
-            spi,
-            empty_buffer: false,
-            finished_regularly: core::cell::Cell::new(false),
-            phantom_read: core::marker::PhantomData,
-        }
-    }
-
-    fn new_for_transfer_in_place(
-        spi: &'spi mut super::Spi<u8>,
-        bank: super::Bank,
-        words: &'read mut [u8],
-    ) -> Self {
-        if words.is_empty() {
-            return Self {
-                bank,
-                spi,
-                empty_buffer: true,
-                finished_regularly: core::cell::Cell::new(false),
-                phantom_read: core::marker::PhantomData,
-            };
-        }
-        let write_idx = Self::generic_init_transfer_write_transfer_in_place(spi, bank, words);
-        let len = words.len();
-        let context = &TRANSFER_CONTEXTS[bank as usize];
-        // Publish the guarded fields before opening the gate, see [TransferContext].
-        // Safety: The future borrows `words` for its lifetime and the `Drop` impl closes the gate.
-        unsafe { context.state.set_rx_slice(words) };
-        context.state.clear_tx_slice();
-        context
-            .state
-            .tx_progress
-            .store(write_idx, Ordering::Relaxed);
-        context.state.rx_progress.store(0, Ordering::Relaxed);
-        context.rx_overrun.store(false, Ordering::Relaxed);
-        context.arm(TransferType::TransferInPlace);
-
-        spi.regs.write_interrupt_clear(InterruptClear::ALL);
-        spi.regs
-            .write_interrupt_control(InterruptControl::ENABLE_ALL.with_tx(len > FIFO_DEPTH));
-        spi.regs.modify_ctrl1(|v| v.with_mtxpause(false));
-        Self {
-            bank,
-            spi,
-            empty_buffer: false,
-            finished_regularly: core::cell::Cell::new(false),
-            phantom_read: core::marker::PhantomData,
-        }
-    }
-
-    fn generic_init_transfer(spi: &mut super::Spi<u8>, bank: super::Bank) {
-        TRANSFER_CONTEXTS[bank as usize].state.clear_done();
-        spi.regs
-            .write_interrupt_control(InterruptControl::DISABLE_ALL);
-        spi.regs.write_fifo_clear(FifoClear::ALL);
-        spi.regs.modify_ctrl1(|v| v.with_mtxpause(true));
-    }
-
-    // Returns amount of bytes written to FIFO.
-    fn generic_init_transfer_write_transfer_in_place(
-        spi: &mut super::Spi<u8>,
-        bank: super::Bank,
-        write: &[u8],
-    ) -> usize {
-        Self::generic_init_transfer(spi, bank);
-
-        let write_idx = core::cmp::min(super::FIFO_DEPTH, write.len());
-        (0..write_idx).for_each(|idx| {
-            spi.regs
-                .write_data(data_word(write[idx] as u32, idx == write.len() - 1));
-        });
-
-        Self::set_triggers(spi, write_idx, write.len());
-        write_idx
-    }
-
-    fn set_triggers(spi: &mut super::Spi<u8>, fifo_prefill: usize, write_len: usize) {
-        spi.regs
-            .write_rx_fifo_trigger(TriggerLevel::new(u5::new(core::cmp::min(
-                fifo_prefill,
-                FIFO_DEPTH / 2,
-            ) as u8)));
-        // We want to re-fill the TX FIFO before it is completely empty if the full transfer size
-        // is larger than the FIFO depth. Otherwise, set it to 0. Not exactly sure what that does,
-        // but we do not enable interrupts anyway.
-        if write_len > super::FIFO_DEPTH {
-            spi.regs
-                .write_tx_fifo_trigger(TriggerLevel::new(u5::new(8)));
-        } else {
-            spi.regs
-                .write_tx_fifo_trigger(TriggerLevel::new(u5::new(0)));
-        }
-    }
-}
-
-impl<'spi> Future for Transfer<'spi, '_, '_> {
-    type Output = Result<(), RxOverrunError>;
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        if self.empty_buffer {
-            return core::task::Poll::Ready(Ok(()));
-        }
-        let context = &TRANSFER_CONTEXTS[self.bank as usize];
-        if context.state.poll_done(cx.waker()) {
-            let rx_overrun = context.rx_overrun.load(Ordering::Relaxed);
-            // Closes the gate, so a spurious interrupt for this bank can never dereference the
-            // buffer pointers of the transfer which just finished.
-            context.reset();
-            self.finished_regularly.set(true);
-            if rx_overrun {
-                return core::task::Poll::Ready(Err(RxOverrunError));
-            }
-            return core::task::Poll::Ready(Ok(()));
-        }
-        core::task::Poll::Pending
-    }
-}
-
-impl<'spi> Drop for Transfer<'spi, '_, '_> {
+impl Drop for TransferGuard<'_, '_> {
     fn drop(&mut self) {
-        if !self.finished_regularly.get() && !self.empty_buffer {
-            // On cancellation, close the gate so a spurious or late interrupt for this bank can
-            // never dereference the buffer pointers of the cancelled transfer. `finished_regularly`
-            // is what distinguishes cancellation from completion here, since `poll` already swapped
-            // `done` back to `false` by the time a completed future is dropped.
-            TRANSFER_CONTEXTS[self.bank as usize].reset();
-            // It might be sufficient to disable and enable the SPI.. But this definitely
-            // ensures the SPI is fully reset.
-            self.spi.regs.write_interrupt_clear(InterruptClear::ALL);
-            self.spi
-                .regs
-                .write_interrupt_control(InterruptControl::DISABLE_ALL);
-            self.spi.regs.write_fifo_clear(FifoClear::ALL);
-            // Clearing the FIFO does not end the blockmode frame, so the chip select would stay
-            // asserted for a cancelled transfer. BMSKIPDATA together with BMSTOP ends the frame
-            // without clocking out another data word. This has to happen after the FIFO clear,
-            // otherwise the word is discarded again.
-            self.spi.regs.write_data(Data::new_with_raw_value(
+        let context = &TRANSFER_CONTEXTS[self.0.bank_id() as usize];
+        // When the future is polled to completion, the transfer type is cleared. Shutdown handling
+        // was done by the interrupt handler itself.
+        if context.active_transfer_type().is_none() {
+            return;
+        }
+        // Clear the active transfer first, so the interrupt handler can not mark it as done
+        // anymore.
+        context.reset();
+        let regs = &mut self.0.0.regs;
+        regs.write_interrupt_clear(InterruptClear::ALL);
+        regs.write_interrupt_control(InterruptControl::DISABLE_ALL);
+        regs.write_fifo_clear(FifoClear::ALL);
+        // Only needed if the transfer was cancelled while in flight.
+        // This check ensures that we only send the STOP signal once.
+        if !context.state.is_done() {
+            // Ends the blockmode frame so CS is deasserted, without clocking out a word.
+            // Must come after the FIFO clear, which would discard it.
+            regs.write_data(Data::new_with_raw_value(
                 BMSTART_BMSTOP_MASK | BMSKIPDATA_MASK,
             ));
         }
@@ -733,6 +473,8 @@ impl Spi {
     ///
     /// The user MUST ensure that the `Drop` method of all futures generated with this driver
     /// is called on transfer cancellation. By default, this does not require any special handling.
+    /// Do *NOT* use `core::mem::forget` on a started future. The interrupt handler would keep
+    /// accessing the buffers after they are gone.
     /// This case was considered exotic enough to justify not making the function `unsafe`.
     pub fn new(
         mut spi: super::Spi<u8>,
@@ -783,23 +525,31 @@ impl Spi {
         on_interrupt(bank_id);
     }
 
-    /// Future which read `words` from the slave.
+    /// Read `words` from the slave.
     ///
-    /// Returns [None] if the provided buffer is empty.
-    pub fn read<'read>(&mut self, words: &'read mut [u8]) -> Transfer<'_, 'read, '_> {
-        let id = self.0.id;
-        Transfer::new_for_read(&mut self.0, id, words)
+    /// Returns immediately if the provided buffer is empty.
+    pub async fn read(&mut self, words: &mut [u8]) -> Result<(), RxOverrunError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        let bank = self.bank_id();
+        let _guard = self.start_read(words);
+        core::future::poll_fn(|cx| poll_transfer_done(bank, cx)).await
     }
 
-    /// Future which writes `words` to the slave, ignoring all the incoming words.
+    /// Write `words` to the slave, ignoring all the incoming words.
     ///
-    /// Returns [None] if the provided buffer is empty.
-    pub fn write<'write>(&mut self, words: &'write [u8]) -> Transfer<'_, '_, 'write> {
-        let id = self.0.id;
-        Transfer::new_for_write(&mut self.0, id, words)
+    /// Returns immediately if the provided buffer is empty.
+    pub async fn write(&mut self, words: &[u8]) -> Result<(), RxOverrunError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        let bank = self.bank_id();
+        let _guard = self.start_write(words);
+        core::future::poll_fn(|cx| poll_transfer_done(bank, cx)).await
     }
 
-    /// Future which writes and reads simultaneously. `write` is written to the slave on MOSI and
+    /// Write and read simultaneously. `write` is written to the slave on MOSI and
     /// words received on MISO are stored in `read`.
     ///
     /// It is allowed for `read` and `write` to have different lengths, even zero length.
@@ -807,24 +557,192 @@ impl Spi {
     /// incoming words after `read` has been filled will be discarded. If `write` is shorter,
     /// the value of words sent in MOSI after all `write` has been sent is 0.
     ///
-    /// Returns [None] if either of the provided buffers is empty.
-    pub fn transfer<'read, 'write>(
-        &mut self,
-        read: &'read mut [u8],
-        write: &'write [u8],
-    ) -> Transfer<'_, 'read, 'write> {
-        let id = self.0.id;
-        Transfer::new_for_transfer(&mut self.0, id, read, write)
+    /// Returns immediately if either of the provided buffers is empty.
+    pub async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), RxOverrunError> {
+        if read.is_empty() || write.is_empty() {
+            return Ok(());
+        }
+        let bank = self.bank_id();
+        let _guard = self.start_transfer(read, write);
+        core::future::poll_fn(|cx| poll_transfer_done(bank, cx)).await
     }
 
-    /// Future which writes and reads simultaneously. The contents of `words` are
-    /// written to the slave, and the received words are stored into the same
-    /// `words` buffer, overwriting it.
+    /// Write and read simultaneously. The contents of `words` are written to the slave, and the
+    /// received words are stored into the same `words` buffer, overwriting it.
     ///
-    /// Returns [None] if the provided buffer is empty.
-    pub fn transfer_in_place<'read>(&mut self, words: &'read mut [u8]) -> Transfer<'_, 'read, '_> {
-        let id = self.0.id;
-        Transfer::new_for_transfer_in_place(&mut self.0, id, words)
+    /// Returns immediately if the provided buffer is empty.
+    pub async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), RxOverrunError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        let bank = self.bank_id();
+        let _guard = self.start_transfer_in_place(words);
+        core::future::poll_fn(|cx| poll_transfer_done(bank, cx)).await
+    }
+
+    fn start_read<'spi, 'buf>(&'spi mut self, words: &'buf mut [u8]) -> TransferGuard<'spi, 'buf> {
+        self.init_transfer();
+
+        let len = words.len();
+        let write_index = core::cmp::min(super::FIFO_DEPTH, len);
+        // Send dummy bytes.
+        (0..write_index).for_each(|idx| {
+            self.0.regs.write_data(data_word(0, idx == len - 1));
+        });
+
+        self.set_triggers(write_index, len);
+
+        let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
+        // Publish the guarded fields before opening the gate, see [TransferContext].
+        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        unsafe { context.state.set_rx_slice(words) };
+        context.state.clear_tx_slice();
+        context
+            .state
+            .tx_progress
+            .store(write_index, Ordering::Relaxed);
+        context.state.rx_progress.store(0, Ordering::Relaxed);
+        context.rx_overrun.store(false, Ordering::Relaxed);
+        context.arm(TransferType::Read);
+
+        self.release_tx_pause(len > FIFO_DEPTH)
+    }
+
+    fn start_write<'spi, 'buf>(&'spi mut self, words: &'buf [u8]) -> TransferGuard<'spi, 'buf> {
+        let write_index = self.init_transfer_and_prefill(words);
+        let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
+        // Publish the guarded fields before opening the gate, see [TransferContext].
+        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        unsafe { context.state.set_tx_slice(words) };
+        context.state.clear_rx_slice();
+        context
+            .state
+            .tx_progress
+            .store(write_index, Ordering::Relaxed);
+        context.state.rx_progress.store(0, Ordering::Relaxed);
+        context.rx_overrun.store(false, Ordering::Relaxed);
+        context.arm(TransferType::Write);
+
+        self.release_tx_pause(words.len() > FIFO_DEPTH)
+    }
+
+    fn start_transfer<'spi, 'buf>(
+        &'spi mut self,
+        read: &'buf mut [u8],
+        write: &'buf [u8],
+    ) -> TransferGuard<'spi, 'buf> {
+        let full_write_len = core::cmp::max(read.len(), write.len());
+        let fifo_prefill = core::cmp::min(super::FIFO_DEPTH, full_write_len);
+
+        self.init_transfer();
+
+        for write_index in 0..fifo_prefill {
+            let value = write.get(write_index).copied().unwrap_or(0);
+            self.0
+                .regs
+                .write_data(data_word(value as u32, write_index == full_write_len - 1));
+        }
+
+        self.set_triggers(fifo_prefill, full_write_len);
+
+        let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
+        // Publish the guarded fields before opening the gate, see [TransferContext].
+        // Safety: The guard borrows both buffers for its lifetime and closes the gate on drop.
+        unsafe {
+            context.state.set_tx_slice(write);
+            context.state.set_rx_slice(read);
+        }
+        context
+            .state
+            .tx_progress
+            .store(fifo_prefill, Ordering::Relaxed);
+        context.state.rx_progress.store(0, Ordering::Relaxed);
+        context.rx_overrun.store(false, Ordering::Relaxed);
+        context.arm(TransferType::Transfer);
+
+        self.release_tx_pause(fifo_prefill > FIFO_DEPTH)
+    }
+
+    fn start_transfer_in_place<'spi, 'buf>(
+        &'spi mut self,
+        words: &'buf mut [u8],
+    ) -> TransferGuard<'spi, 'buf> {
+        let write_idx = self.init_transfer_and_prefill(words);
+        let len = words.len();
+        let context = &TRANSFER_CONTEXTS[self.bank_id() as usize];
+        // Publish the guarded fields before opening the gate, see [TransferContext].
+        // Safety: The guard borrows `words` for its lifetime and closes the gate on drop.
+        unsafe { context.state.set_rx_slice(words) };
+        context.state.clear_tx_slice();
+        context
+            .state
+            .tx_progress
+            .store(write_idx, Ordering::Relaxed);
+        context.state.rx_progress.store(0, Ordering::Relaxed);
+        context.rx_overrun.store(false, Ordering::Relaxed);
+        context.arm(TransferType::TransferInPlace);
+
+        self.release_tx_pause(len > FIFO_DEPTH)
+    }
+
+    fn init_transfer(&mut self) {
+        TRANSFER_CONTEXTS[self.bank_id() as usize]
+            .state
+            .clear_done();
+        self.0
+            .regs
+            .write_interrupt_control(InterruptControl::DISABLE_ALL);
+        self.0.regs.write_fifo_clear(FifoClear::ALL);
+        self.0.regs.modify_ctrl1(|v| v.with_mtxpause(true));
+    }
+
+    /// Returns amount of bytes written to FIFO.
+    fn init_transfer_and_prefill(&mut self, write: &[u8]) -> usize {
+        self.init_transfer();
+
+        let write_idx = core::cmp::min(super::FIFO_DEPTH, write.len());
+        (0..write_idx).for_each(|idx| {
+            self.0
+                .regs
+                .write_data(data_word(write[idx] as u32, idx == write.len() - 1));
+        });
+
+        self.set_triggers(write_idx, write.len());
+        write_idx
+    }
+
+    fn set_triggers(&mut self, fifo_prefill: usize, write_len: usize) {
+        self.0
+            .regs
+            .write_rx_fifo_trigger(TriggerLevel::new(u5::new(core::cmp::min(
+                fifo_prefill,
+                FIFO_DEPTH / 2,
+            ) as u8)));
+        // We want to re-fill the TX FIFO before it is completely empty if the full transfer size
+        // is larger than the FIFO depth. Otherwise, set it to 0. Not exactly sure what that does,
+        // but we do not enable interrupts anyway.
+        if write_len > super::FIFO_DEPTH {
+            self.0
+                .regs
+                .write_tx_fifo_trigger(TriggerLevel::new(u5::new(8)));
+        } else {
+            self.0
+                .regs
+                .write_tx_fifo_trigger(TriggerLevel::new(u5::new(0)));
+        }
+    }
+
+    /// Enables the interrupts and starts the frame. Must be called after the gate was armed.
+    fn release_tx_pause<'spi, 'buf>(
+        &'spi mut self,
+        enable_tx_irq: bool,
+    ) -> TransferGuard<'spi, 'buf> {
+        self.0.regs.write_interrupt_clear(InterruptClear::ALL);
+        self.0
+            .regs
+            .write_interrupt_control(InterruptControl::ENABLE_ALL.with_tx(enable_tx_irq));
+        self.0.regs.modify_ctrl1(|v| v.with_mtxpause(false));
+        TransferGuard(self, PhantomData)
     }
 }
 
@@ -834,30 +752,18 @@ impl embedded_hal_async::spi::ErrorType for Spi {
 
 impl embedded_hal_async::spi::SpiBus for Spi {
     async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        if words.is_empty() {
-            return Ok(());
-        }
         self.read(words).await
     }
 
     async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-        if words.is_empty() {
-            return Ok(());
-        }
         self.write(words).await
     }
 
     async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
-        if read.is_empty() && write.is_empty() {
-            return Ok(());
-        }
         self.transfer(read, write).await
     }
 
     async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        if words.is_empty() {
-            return Ok(());
-        }
         self.transfer_in_place(words).await
     }
 

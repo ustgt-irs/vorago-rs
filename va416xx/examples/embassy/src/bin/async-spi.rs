@@ -12,6 +12,7 @@
 //! the chip select does when a transfer is dropped in flight. See the constant for details.
 #![no_std]
 #![no_main]
+use core::future::Future;
 use defmt_rtt as _;
 use panic_probe as _;
 
@@ -39,10 +40,9 @@ const LOOPBACK_MODE: bool = true;
 
 /// Drop a transfer future which is still in flight, once per cycle.
 ///
-/// The future prefills the FIFO and releases the TX pause when it is constructed, so the frame
-/// is already running before the first poll. Dropping it without awaiting therefore cancels a
-/// real in-flight transfer. The cancelled transfer is longer than the 16 word FIFO, so it can
-/// not have completed on its own.
+/// The future is polled once, which prefills the FIFO and starts the frame, and then dropped.
+/// This cancels a real in-flight transfer. The cancelled transfer is longer than the 16 word
+/// FIFO, so it can not have completed on its own.
 ///
 /// Enable this to check that the chip select is released on cancellation. It should go inactive
 /// with the drop and stay there for the idle second which follows. Clearing the FIFOs alone does
@@ -103,7 +103,14 @@ async fn main(_spawner: Spawner) {
         defmt::info!("async SPI transfers successful");
 
         if TEST_TRANSFER_CANCELLATION {
-            drop(spi.write(&cancel_buf));
+            {
+                let mut write = core::pin::pin!(spi.write(&cancel_buf));
+                // The first poll starts the transfer. The future is dropped at the end of the
+                // scope.
+                let _ = write.as_mut().poll(&mut core::task::Context::from_waker(
+                    core::task::Waker::noop(),
+                ));
+            }
             defmt::info!("dropped in-flight SPI write, probe CS until the next transfer");
         }
 
