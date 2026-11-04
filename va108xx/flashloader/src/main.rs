@@ -284,9 +284,7 @@ mod app {
         loop {
             let read_len = cx.local.tm_rx.read(&mut buf).await;
             // Safety: The buffer outlives the UART TX structure.
-            if let Err(e) = cx.local.uart_tx.write_all(&buf[0..read_len]).await {
-                defmt::warn!("UART TX overrun error: {}", e);
-            }
+            cx.local.uart_tx.write_all(&buf[0..read_len]).await;
         }
     }
 }

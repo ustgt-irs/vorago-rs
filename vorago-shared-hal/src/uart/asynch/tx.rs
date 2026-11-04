@@ -1,5 +1,5 @@
 //! Asynchronous UART transmission functionality.
-use core::{future::Future, sync::atomic::Ordering};
+use core::{marker::PhantomData, sync::atomic::Ordering};
 
 use embassy_sync::waitqueue::AtomicWaker;
 use portable_atomic::{AtomicBool, AtomicPtr, AtomicUsize};
@@ -29,7 +29,6 @@ struct TxContext {
     progress: AtomicUsize,
     raw_data: AtomicPtr<u8>,
     transfer_len: AtomicUsize,
-    tx_overrun: AtomicBool,
 }
 
 impl TxContext {
@@ -38,7 +37,6 @@ impl TxContext {
             progress: AtomicUsize::new(0),
             raw_data: AtomicPtr::new(core::ptr::null_mut()),
             transfer_len: AtomicUsize::new(0),
-            tx_overrun: AtomicBool::new(false),
         }
     }
 }
@@ -54,7 +52,7 @@ fn on_interrupt(bank: Bank) {
     }
 
     let context = &TX_CONTEXTS[idx];
-    // `Acquire` pairs with the `Release` store in `TxFuture::new`: seeing a non-null pointer
+    // `Acquire` pairs with the `Release` store in `Tx::start_transfer`: seeing a non-null pointer
     // here guarantees `transfer_len`/`progress` below are the values published together with
     // it, not stale ones from a previous transfer.
     let raw_data_ptr = context.raw_data.load(Ordering::Acquire);
@@ -63,11 +61,7 @@ fn on_interrupt(bank: Bank) {
         return;
     }
 
-    let tx_status = uart.read_tx_status();
     let interrupt_status = uart.read_interrupt_status();
-    context
-        .tx_overrun
-        .store(tx_status.wr_lost(), Ordering::Relaxed);
 
     let slice_len = context.transfer_len.load(Ordering::Relaxed);
     let mut progress = context.progress.load(Ordering::Relaxed);
@@ -83,7 +77,7 @@ fn on_interrupt(bank: Bank) {
         });
         uart.modify_enable(|value| value.with_tx(false));
         // Transfer is done. `Release` publishes the final `progress` to whichever context
-        // observes `TX_DONE` via the `Acquire` swap in `poll`.
+        // observes `TX_DONE` via the `Acquire` swap in `poll_transfer_done`.
         TX_DONE[idx].store(true, Ordering::Release);
         UART_TX_WAKERS[idx].wake();
         return;
@@ -105,132 +99,6 @@ fn on_interrupt(bank: Bank) {
     context.progress.store(progress, Ordering::Relaxed);
 }
 
-/// Live UART TX transfer returned by [Tx::write].
-///
-/// Implements [Future] and can be polled/awaited to completion.
-#[derive(Debug)]
-pub struct Transfer<'uart, 'buf> {
-    id: Bank,
-    empty_buffer: bool,
-    // Set once `poll` observes completion. `TX_DONE` itself is not enough to tell completion
-    // and cancellation apart in `Drop`, because `poll` already swaps it back to `false` as
-    // part of observing it.
-    completed: bool,
-    phantom: core::marker::PhantomData<(&'uart (), &'buf ())>,
-}
-
-impl<'uart, 'buf> Transfer<'uart, 'buf> {
-    /// # Safety
-    ///
-    /// This function stores the raw pointer of the passed data slice. The user MUST ensure
-    /// that the slice outlives the data structure.
-    /// This case was considered exotic enough to justify not making the function `unsafe`.
-    pub fn new(tx: &'uart mut crate::uart::Tx, data: &'buf [u8]) -> Self {
-        if data.is_empty() {
-            // We can just return a dummy future which is immediately ready, no need to set up
-            // interrupts etc.
-            return Self {
-                id: tx.id,
-                empty_buffer: true,
-                completed: false,
-                phantom: core::marker::PhantomData,
-            };
-        }
-        let idx = tx.id as usize;
-        TX_DONE[idx].store(false, Ordering::Relaxed);
-        tx.disable_interrupts();
-        tx.disable();
-        tx.clear_fifo();
-
-        let init_fill_count = core::cmp::min(data.len(), FIFO_DEPTH);
-        // We fill the FIFO.
-        for data in data.iter().take(init_fill_count) {
-            tx.regs.write_data(Data::new_with_raw_value(*data as u32));
-        }
-
-        let context = &TX_CONTEXTS[idx];
-        // Publish the guarded fields before opening the gate (`raw_data`) with `Release`, so a
-        // reader that observes `raw_data` non-null via the `Acquire` load in `on_interrupt` is
-        // guaranteed to see these too, rather than stale values from a previous transfer.
-        context.transfer_len.store(data.len(), Ordering::Relaxed);
-        context.progress.store(init_fill_count, Ordering::Relaxed);
-        context.tx_overrun.store(false, Ordering::Relaxed);
-        context
-            .raw_data
-            .store(data.as_ptr().cast_mut(), Ordering::Release);
-
-        // Ensure those are enabled together. Doing this before the gate is armed can lead to
-        // weird glitches otherwise.
-        tx.enable_interrupts(
-            data.len() > FIFO_DEPTH,
-            #[cfg(feature = "vor4x")]
-            true,
-        );
-        tx.enable();
-
-        Self {
-            id: tx.id,
-            empty_buffer: false,
-            completed: false,
-            phantom: core::marker::PhantomData,
-        }
-    }
-}
-
-impl Future for Transfer<'_, '_> {
-    type Output = Result<usize, TxOverrunError>;
-
-    fn poll(
-        mut self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        if self.empty_buffer {
-            return core::task::Poll::Ready(Ok(0));
-        }
-        UART_TX_WAKERS[self.id as usize].register(cx.waker());
-        // `Acquire` pairs with the `Release` store in `on_interrupt`.
-        if TX_DONE[self.id as usize].swap(false, Ordering::Acquire) {
-            let context = &TX_CONTEXTS[self.id as usize];
-            // `Release`: pairs with the `Acquire` load in `on_interrupt`, so a spurious
-            // interrupt for this slot after completion can never see a dangling pointer.
-            context
-                .raw_data
-                .store(core::ptr::null_mut(), Ordering::Release);
-            let progress = context.progress.load(Ordering::Relaxed);
-            self.completed = true;
-            return core::task::Poll::Ready(Ok(progress));
-        }
-        core::task::Poll::Pending
-    }
-}
-
-/// Safety note:
-///
-/// It is imperative that this `Drop` method is executed to avoid undefined behaviour on
-/// transfer. Do *NOT* use `core::mem::forget` on the `TxFuture`.
-impl Drop for Transfer<'_, '_> {
-    fn drop(&mut self) {
-        if self.empty_buffer {
-            return;
-        }
-        let mut reg_block = unsafe { self.id.steal_regs() };
-        disable_tx_interrupts(&mut reg_block);
-        disable_tx(&mut reg_block);
-        // On cancellation, clear the stale buffer pointer so a spurious or future interrupt for
-        // this UART can never dereference it. `self.completed` (set inside `poll`'s `Ready` arm)
-        // is what actually distinguishes cancellation from normal completion here, since
-        // `TX_DONE` itself is already swapped back to `false` by the time a completed future is
-        // dropped.
-        if !self.completed {
-            let context = &TX_CONTEXTS[self.id as usize];
-            context.progress.store(0, Ordering::Relaxed);
-            context
-                .raw_data
-                .store(core::ptr::null_mut(), Ordering::Release);
-        }
-    }
-}
-
 /// Asynchronous UART transmitter (TX) driver.
 #[derive(Debug)]
 pub struct Tx(crate::uart::Tx);
@@ -240,6 +108,8 @@ impl Tx {
     ///
     /// The user MUST ensure that the `Drop` method of all futures generated with this driver
     /// is called on transfer cancellation. By default, this does not require any special handling.
+    /// Do *NOT* use `core::mem::forget` on a started future. The interrupt handler would keep
+    /// reading from the buffer after it is gone.
     /// This case was considered exotic enough to not justify an `unsafe` API.
     pub fn new(tx: crate::uart::Tx) -> Self {
         Self(tx)
@@ -276,26 +146,67 @@ impl Tx {
     ///
     /// This implementation is not side effect free, and a started future might have already
     /// written part of the passed buffer.
-    pub fn write<'buf>(&mut self, buf: &'buf [u8]) -> Transfer<'_, 'buf> {
-        Transfer::new(&mut self.0, buf)
+    pub async fn write(&mut self, buf: &[u8]) -> usize {
+        if buf.is_empty() {
+            return 0;
+        }
+        let id = self.bank_id();
+        let _guard = self.start_transfer(buf);
+        core::future::poll_fn(|cx| poll_transfer_done(id, cx)).await
+    }
+
+    /// The returned guard borrows `buf` and stops the transfer when dropped, because the
+    /// interrupt handler reads from `buf` until then.
+    fn start_transfer<'tx, 'buf>(&'tx mut self, buf: &'buf [u8]) -> TransferGuard<'tx, 'buf> {
+        let idx = self.bank_id() as usize;
+        TX_DONE[idx].store(false, Ordering::Relaxed);
+        self.0.disable_interrupts();
+        self.0.disable();
+        self.0.clear_fifo();
+
+        let init_fill_count = core::cmp::min(buf.len(), FIFO_DEPTH);
+        // We fill the FIFO.
+        for data in buf.iter().take(init_fill_count) {
+            self.0
+                .regs
+                .write_data(Data::new_with_raw_value(*data as u32));
+        }
+
+        let context = &TX_CONTEXTS[idx];
+        // Publish the guarded fields before opening the gate (`raw_data`) with `Release`, so a
+        // reader that observes `raw_data` non-null via the `Acquire` load in `on_interrupt` is
+        // guaranteed to see these too, rather than stale values from a previous transfer.
+        context.transfer_len.store(buf.len(), Ordering::Relaxed);
+        context.progress.store(init_fill_count, Ordering::Relaxed);
+        context
+            .raw_data
+            .store(buf.as_ptr().cast_mut(), Ordering::Release);
+
+        // Ensure those are enabled together. Doing this before the gate is armed can lead to
+        // weird glitches otherwise.
+        self.0.enable_interrupts(
+            buf.len() > FIFO_DEPTH,
+            #[cfg(feature = "vor4x")]
+            true,
+        );
+        self.0.enable();
+        TransferGuard(self, PhantomData)
     }
 
     /// Write an entire buffer into this writer.
     ///
-    /// This function calls `write()` in a loop until exactly `buf.len()` bytes have
-    /// been written, waiting if needed.
+    /// Calls [Self::write] until all bytes were written.
     ///
-    /// This function is not side-effect-free on cancel (AKA "cancel-safe"), i.e. if you cancel (drop) a returned
-    /// future that hasn't completed yet, some bytes might have already been written.
-    pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), TxOverrunError> {
-        let fut = <Self as embedded_io_async::Write>::write_all(self, buf);
-        fut.await
+    /// This function is not cancel-safe. If the future is dropped before it completes, some
+    /// bytes might have already been written.
+    pub async fn write_all(&mut self, buf: &[u8]) {
+        // Operation is infallible, ignore error.
+        let Ok(()) = <Self as embedded_io_async::Write>::write_all(self, buf).await;
     }
 
     /// Wait until all written data has actually left the FIFO.
-    pub async fn flush(&mut self) -> Result<(), TxOverrunError> {
+    pub async fn flush(&mut self) {
         while !tx_is_drained(&self.0) {}
-        Ok(())
     }
 
     /// Release the wrapped blocking driver.
@@ -304,20 +215,44 @@ impl Tx {
     }
 }
 
-/// A write was lost because the TX FIFO overran.
-#[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[error("TX overrun error")]
-pub struct TxOverrunError;
+/// Returns the number of written bytes once the interrupt handler signals completion.
+fn poll_transfer_done(bank: Bank, cx: &mut core::task::Context<'_>) -> core::task::Poll<usize> {
+    let idx = bank as usize;
+    UART_TX_WAKERS[idx].register(cx.waker());
+    // `Acquire` pairs with the `Release` store in `on_interrupt`.
+    if !TX_DONE[idx].swap(false, Ordering::Acquire) {
+        return core::task::Poll::Pending;
+    }
+    let context = &TX_CONTEXTS[idx];
+    // `Release`: pairs with the `Acquire` load in `on_interrupt`, so a spurious
+    // interrupt for this slot after completion can never see a dangling pointer.
+    context
+        .raw_data
+        .store(core::ptr::null_mut(), Ordering::Release);
+    core::task::Poll::Ready(context.progress.load(Ordering::Relaxed))
+}
 
-impl embedded_io_async::Error for TxOverrunError {
-    fn kind(&self) -> embedded_io_async::ErrorKind {
-        embedded_io_async::ErrorKind::Other
+/// Stops the transfer and closes the gate on completion and on cancellation.
+struct TransferGuard<'tx, 'buf>(&'tx mut Tx, PhantomData<&'buf [u8]>);
+
+impl Drop for TransferGuard<'_, '_> {
+    fn drop(&mut self) {
+        let id = self.0.bank_id();
+        let mut reg_block = unsafe { id.steal_regs() };
+        disable_tx_interrupts(&mut reg_block);
+        disable_tx(&mut reg_block);
+        // Clear the buffer pointer so a spurious or future interrupt for this UART can never
+        // dereference it. After completion, this was already done and is harmless.
+        let context = &TX_CONTEXTS[id as usize];
+        context.progress.store(0, Ordering::Relaxed);
+        context
+            .raw_data
+            .store(core::ptr::null_mut(), Ordering::Release);
     }
 }
 
 impl embedded_io::ErrorType for Tx {
-    type Error = TxOverrunError;
+    type Error = core::convert::Infallible;
 }
 
 impl embedded_io_async::Write for Tx {
@@ -326,10 +261,11 @@ impl embedded_io_async::Write for Tx {
     /// This implementation is not side effect free, and a started future might have already
     /// written part of the passed buffer.
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        self.write(buf).await
+        Ok(self.write(buf).await)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.flush().await
+        self.flush().await;
+        Ok(())
     }
 }
