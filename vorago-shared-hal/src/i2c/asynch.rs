@@ -80,13 +80,13 @@ impl TransferContext {
         }
     }
 
-    /// Stores the operations and arms the gate, starting at operation `first`.
+    /// Stores the operations and marks the transfer active, starting at operation `first`.
     ///
     /// # Safety
     ///
-    /// `operations` must stay alive and must not be accessed otherwise until the context is
-    /// disarmed.
-    unsafe fn arm(&self, operations: &mut [Operation<'_>], first: usize, progress: usize) {
+    /// `operations` must stay alive and must not be accessed otherwise while the transfer is
+    /// active.
+    unsafe fn set_active(&self, operations: &mut [Operation<'_>], first: usize, progress: usize) {
         self.ops_len.store(operations.len(), Ordering::Relaxed);
         self.ops_index.store(first, Ordering::Relaxed);
         self.op_progress.store(progress, Ordering::Relaxed);
@@ -94,7 +94,7 @@ impl TransferContext {
             .store(operations.as_mut_ptr().cast(), Ordering::Release);
     }
 
-    /// Returns the operations of the active transfer, or [None] if the gate is disarmed.
+    /// Returns the operations of the active transfer, or [None] if no transfer is active.
     ///
     /// # Safety
     ///
@@ -111,9 +111,9 @@ impl TransferContext {
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, self.ops_len.load(Ordering::Relaxed)) })
     }
 
-    /// Disarms the gate, so a spurious interrupt can never observe the stale operations.
+    /// Clears the active transfer, so a spurious interrupt can never observe the stale operations.
     #[inline]
-    fn disarm(&self) {
+    fn clear_active(&self) {
         self.ops_slice_ptr
             .store(core::ptr::null_mut(), Ordering::Release);
     }
@@ -153,13 +153,13 @@ impl TransferContext {
         self.done.swap(false, Ordering::Acquire)
     }
 
-    /// Closes the gate and restores the initial state, so the slot can be reused.
+    /// Clears the active transfer and restores the initial state, so the slot can be reused.
     #[inline]
     fn reset(&self) {
         // Must come first in program order: a live interrupt (e.g. during Drop's
         // cancellation path) must never see the fields below cleared while still
-        // observing an armed transfer.
-        self.disarm();
+        // observing an active transfer.
+        self.clear_active();
         self.done.store(false, Ordering::Relaxed);
         self.error
             .store(TransferErrorKind::None as u8, Ordering::Relaxed);
@@ -479,7 +479,7 @@ impl I2c {
         let (interrupts, op_index, progress) = start_group(&mut self.0.regs, operations, first);
         // Safety: The returned transfer borrows `operations` until it completes or is dropped.
         // Users are not allowed to forget transfers, see the safety note on [Self::new].
-        unsafe { context.arm(operations, op_index, progress) };
+        unsafe { context.set_active(operations, op_index, progress) };
         self.0.regs.write_interrupt_enable(interrupts);
 
         Ok(Transfer::new(self))
@@ -581,9 +581,9 @@ impl core::future::Future for Transfer<'_, '_> {
 impl Drop for Transfer<'_, '_> {
     fn drop(&mut self) {
         if !self.finished_regularly.get() {
-            // Disarm before disabling the interrupts. An interrupt already pending in the NVIC
-            // would otherwise still see the armed transfer, start the next group and re-enable
-            // the interrupts.
+            // Clear the active transfer before disabling the interrupts. An interrupt already
+            // pending in the NVIC would otherwise still see the active transfer, start the next
+            // group and re-enable the interrupts.
             let context = &TRANSFER_CONTEXTS[self.driver.0.id() as usize];
             context.reset();
             self.driver.0.disable_interrupts();
