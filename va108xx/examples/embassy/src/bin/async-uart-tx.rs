@@ -77,10 +77,7 @@ async fn main(_spawner: Spawner) {
         led1.toggle();
         led2.toggle();
         // Safety: We are sending static lifetime slices, and not cancelling the futures.
-        async_tx
-            .write_all(STR_LIST[idx].as_bytes())
-            .await
-            .expect("writing failed");
+        async_tx.write_all(STR_LIST[idx].as_bytes()).await;
         idx += 1;
         if idx == STR_LIST.len() {
             idx = 0;

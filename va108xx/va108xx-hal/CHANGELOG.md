@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - `asynch::Tx::new` and `Tx::into_async` are safe again. The requirement that the `Drop` handler
   of generated futures runs is documented instead. The corner case is exotic enough to not
   justify an `unsafe` API.
+- `asynch::Tx::write` is now an `async fn` returning the number of written bytes. The `TxFuture`
+  type was removed. The transfer now starts on the first poll of the future, not when `write` is
+  called.
+- Removed `TxOverrunError`. It was never returned. `asynch::Tx::write_all` and `flush` now return
+  `()`, and the `embedded_io` error type of `asynch::Tx` is `core::convert::Infallible`.
 - Added `core::fmt::Write` for the blocking `uart::Tx`, so `write!`/`writeln!` work directly on
   it.
 - `RxAsync` and `RxAsyncOverwriting` were removed, along with the `heapless` dependency they
