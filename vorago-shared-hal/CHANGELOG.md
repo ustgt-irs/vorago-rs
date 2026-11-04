@@ -82,10 +82,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   previous `&mut self` form is still available as `RxWithInterrupt::on_interrupt_owned`, for
   owned-instance use (e.g. an RTIC `local` resource).
 - Added an async I2C driver in a new `i2c::asynch` module: `I2cMaster::into_async`/
-  `asynch::I2c::new` construct it, `I2c::transaction` returns an `asynch::Transfer` future, and
-  the unsafe `I2c::on_interrupt` services it from the peripheral's interrupt vector. `I2c::read`/`write`/
-  `write_read` are async methods built on top of `transaction`. Like the blocking driver, it
-  merges consecutive operations of the same direction into one hardware transfer.
+  `asynch::I2c::new` construct it, `I2c::transaction` is an `async fn`, and the unsafe
+  `I2c::on_interrupt` services it from the peripheral's interrupt vector. The transfer starts on
+  the first poll of the future. `I2c::read`/`write`/`write_read` are async methods built on top
+  of `transaction`. Like the blocking driver, it merges consecutive operations of the same
+  direction into one hardware transfer.
 - Added `Error::Overflow` for I2C, reported when the RX or TX FIFO overflows during a transfer.
 - Several I2C register accessors were renamed for consistency: `cmd` became `command`, and
   `irq_enb`/`irq_raw`/`irq_status`/`irq_clear` became `interrupt_enable`/`interrupt_raw`/
